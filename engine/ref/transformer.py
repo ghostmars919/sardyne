@@ -16,6 +16,7 @@ sommata, SwiGLU al posto della ReLU, GQA. La struttura resta la stessa.
 Il modello ha pesi casuali: serve a studiare il flusso dei dati e le shape, non a
 generare testo sensato. I pesi veri arrivano in Fase 1.
 """
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -115,10 +116,11 @@ class Transformer:
         tokens = np.asarray(tokens)
         start = cache.length if cache is not None else 0
         t = len(tokens)
-        assert start + t <= self.cfg.max_len, "sequenza più lunga di max_len"
+        if start + t > self.cfg.max_len:
+            raise ValueError(f"sequenza più lunga di max_len={self.cfg.max_len}")
 
         # Sez. 3.4 e 3.5: embedding * sqrt(d_model) + positional encoding.
-        x = self.p["tok_emb"][tokens] * np.sqrt(self.cfg.d_model) + self.pe[start:start + t]
+        x = self.p["tok_emb"][tokens] * math.sqrt(self.cfg.d_model) + self.pe[start:start + t]
 
         for li, layer in enumerate(self.p["layers"]):
             # Post-norm come nel paper: LayerNorm(x + Sublayer(x)).
@@ -130,10 +132,13 @@ class Transformer:
         return x @ self.p["tok_emb"].T
 
     def generate(self, prompt, n_new: int) -> list[int]:
-        """Generazione greedy: un passo di prefill sul prompt, poi un token alla volta (decode)."""
+        """Generazione greedy: un passo di prefill sul prompt, poi un token alla volta (decode).
+
+        Restituisce solo i token nuovi, come Llama.generate.
+        """
         cache = KVCache(self.cfg)
         logits = self.forward(prompt, cache)  # prefill
-        out = list(prompt)
+        out = []
         for _ in range(n_new):
             nxt = int(np.argmax(logits[-1]))
             out.append(nxt)
@@ -147,4 +152,4 @@ if __name__ == "__main__":
     print(cfg)
     print(f"parametri: {count_params(model.p):,}")
     prompt = list(b"Attention")
-    print("generato (pesi casuali):", model.generate(prompt, 10))
+    print("generato (pesi casuali):", prompt + model.generate(prompt, 10))

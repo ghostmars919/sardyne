@@ -7,3 +7,4 @@ models/
 *.egg-info/
 ._*
 .DS_Store
+third_party/

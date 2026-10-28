@@ -6,8 +6,8 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "safetensors", "tokenizers", "jinja2"]
-# solo per confronti nei test (pesanti):
+dev = ["pytest>=7", "safetensors", "tokenizers", "jinja2", "huggingface_hub"]
+# solo per i confronti con HF nei test (installare torch da https://download.pytorch.org/whl/cpu):
 ref = ["torch", "transformers"]
 
 [tool.pytest.ini_options]

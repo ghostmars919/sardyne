@@ -114,13 +114,15 @@ def test_kv_cache_matches_full_forward(model):
 
 
 def test_generate_is_greedy_and_deterministic(model):
-    out = model.generate([1, 2, 3], 5)
-    assert len(out) == 8 and out == model.generate([1, 2, 3], 5)
+    prompt = [1, 2, 3]
+    new = model.generate(prompt, 5)
+    assert len(new) == 5 and new == model.generate(prompt, 5)
     # Ogni token generato è l'argmax dei logits sull'intero prefisso.
+    seq = prompt + new
     for i in range(3, 8):
-        assert out[i] == int(np.argmax(model.forward(out[:i])[-1]))
+        assert seq[i] == int(np.argmax(model.forward(seq[:i])[-1]))
 
 
 def test_max_len_enforced(model):
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         model.forward(list(range(model.cfg.max_len + 1)))
