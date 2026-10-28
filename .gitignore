@@ -1,0 +1,9 @@
+build/
+.venv/
+__pycache__/
+*.gguf
+*.safetensors
+models/
+*.egg-info/
+._*
+.DS_Store
