@@ -52,6 +52,40 @@ _SIGNATURES = {
 }
 
 
+class EngineModelInfo(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_int32) for name in
+                ("n_vocab", "dim", "n_layer", "n_head", "n_kv_head", "head_dim", "ffn_dim", "max_pos")] + \
+               [("norm_eps", ctypes.c_float), ("rope_theta", ctypes.c_float)] + \
+               [(name, ctypes.c_int32) for name in ("rope_interleaved", "qkv_bias", "tied_embeddings")]
+
+
+_vp, _i32, _fp = ctypes.c_void_p, ctypes.c_int32, ctypes.POINTER(ctypes.c_float)
+_SIGNATURES.update({
+    # runtime (csrc/engine.h)
+    "engine_model_load": (_vp, [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]),
+    "engine_model_free": (None, [_vp]),
+    "engine_model_get_info": (None, [_vp, ctypes.POINTER(EngineModelInfo)]),
+    "engine_ctx_new": (_vp, [_vp, _i32, _i32, _i32, ctypes.c_char_p, ctypes.c_size_t]),
+    "engine_ctx_free": (None, [_vp]),
+    "engine_eval": (ctypes.c_int, [_vp, ctypes.POINTER(_i32), _i32]),
+    "engine_logits": (_fp, [_vp]),
+    "engine_n_logits": (_i32, [_vp]),
+    "engine_n_past": (_i32, [_vp]),
+    "engine_reset": (None, [_vp]),
+    "engine_last_error": (ctypes.c_char_p, [_vp]),
+    # kernel (csrc/ops.h), esposti per i test di confronto con NumPy
+    "op_f16_to_f32_n": (None, [_vp, _vp, ctypes.c_size_t]),
+    "op_matmul": (None, [_vp, _vp, _vp, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]),
+    "op_rmsnorm": (None, [_vp, _vp, _vp, ctypes.c_int, ctypes.c_float]),
+    "op_softmax": (None, [_vp, ctypes.c_int]),
+    "op_silu_mul": (None, [_vp, _vp, ctypes.c_int]),
+    "op_rope_table": (None, [_vp, _vp, ctypes.c_int, ctypes.c_int, ctypes.c_float]),
+    "op_rope": (None, [_vp, ctypes.c_int, ctypes.c_int, _vp, _vp, ctypes.c_int]),
+    "op_attention": (None, [_vp, _vp, _vp, _vp, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                            ctypes.c_int, _vp]),
+})
+
+
 def lib_path() -> pathlib.Path:
     return pathlib.Path(os.environ.get("LLM_ENGINE_LIB", _ROOT / "build" / _LIBNAME))
 
