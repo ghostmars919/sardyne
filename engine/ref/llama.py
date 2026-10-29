@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
+from engine import quant
 from engine.loader import hf_config
 from engine.loader.gguf import GGUFFile
 from engine.loader.safetensors import SafeTensorsDir
@@ -223,13 +224,27 @@ class KVCache:
         return sum(a.nbytes for a in self.k) * 2
 
 
+# Chiavi del dizionario dei parametri -> nomi dei tensori GGUF di ogni strato.
+_GGUF_MATRICES = {"wq": "attn_q", "wk": "attn_k", "wv": "attn_v", "wo": "attn_output",
+                  "w_gate": "ffn_gate", "w_up": "ffn_up", "w_down": "ffn_down"}
+
+
 class Llama:
-    def __init__(self, cfg: LlamaConfig, params: dict, max_seq: int = 2048):
+    def __init__(self, cfg: LlamaConfig, params: dict, max_seq: int = 2048, act_quant: dict | None = None):
+        """act_quant: {id(matrice): "Q8_0" | "Q8_K"} per emulare il runtime C, che quantizza le
+        attivazioni prima di ogni matmul con pesi quantizzati (vedi from_gguf)."""
         check_shapes(cfg, params)
         self.cfg = cfg
         self.p = params
         self.max_seq = min(max_seq, cfg.max_pos)
         self.cos, self.sin = ops.rope_cos_sin(self.max_seq, cfg.head_dim, cfg.rope_theta)
+        self._act_quant = act_quant or {}
+
+    def linear(self, x, w, b=None):
+        kind = self._act_quant.get(id(w))
+        if kind:
+            x = quant.fake_quant(x, kind)  # stesso errore delle attivazioni int8 del runtime C
+        return ops.linear(x, w, b)
 
     @classmethod
     def from_dir(cls, path, max_seq: int = 2048) -> "Llama":
@@ -238,11 +253,24 @@ class Llama:
         return cls(cfg, load_weights(cfg, SafeTensorsDir(path)), max_seq)
 
     @classmethod
-    def from_gguf(cls, path, max_seq: int = 2048) -> "Llama":
+    def from_gguf(cls, path, max_seq: int = 2048, emulate_quant: bool = False) -> "Llama":
+        """Pesi quantizzati -> dequantizzati in fp32. Con emulate_quant=True anche le attivazioni
+        vengono quantizzate come nel runtime C: è il riferimento per confrontarlo con tolleranze
+        strette (l'errore delle attivazioni int8 si amplifica con la profondità del modello)."""
         with GGUFFile(path) as gf:
             cfg = LlamaConfig.from_gguf(gf)
             params = load_weights_gguf(cfg, gf)
-        return cls(cfg, params, max_seq)
+            act = {}
+            if emulate_quant:
+                def tag(arr, name):
+                    kind = quant.VEC_DOT_TYPE.get(gf.tensors[name].type_name)
+                    if kind:
+                        act[id(arr)] = kind
+                tag(params["lm_head"], "token_embd.weight" if cfg.tie_embeddings else "output.weight")
+                for i, layer in enumerate(params["layers"]):
+                    for key, gname in _GGUF_MATRICES.items():
+                        tag(layer[key], f"blk.{i}.{gname}.weight")
+        return cls(cfg, params, max_seq, act)
 
     @classmethod
     def load(cls, path, max_seq: int = 2048) -> "Llama":
@@ -257,9 +285,9 @@ class Llama:
     def attention(self, x, layer, li, pos0, cache, mask):
         c = self.cfg
         t, hd = x.shape[0], c.head_dim
-        q = ops.split_heads(ops.linear(x, layer["wq"], layer.get("bq")), c.n_head)  # [nh, T, hd]
-        k = ops.split_heads(ops.linear(x, layer["wk"], layer.get("bk")), c.n_kv_head)  # [nkv, T, hd]
-        v = ops.split_heads(ops.linear(x, layer["wv"], layer.get("bv")), c.n_kv_head)
+        q = ops.split_heads(self.linear(x, layer["wq"], layer.get("bq")), c.n_head)  # [nh, T, hd]
+        k = ops.split_heads(self.linear(x, layer["wk"], layer.get("bk")), c.n_kv_head)  # [nkv, T, hd]
+        v = ops.split_heads(self.linear(x, layer["wv"], layer.get("bv")), c.n_kv_head)
 
         cos, sin = self.cos[pos0:pos0 + t], self.sin[pos0:pos0 + t]
         rope = ops.apply_rope_interleaved if c.rope_interleaved else ops.apply_rope
@@ -277,7 +305,7 @@ class Llama:
         n_rep = c.n_head // c.n_kv_head
         qg = q.reshape(c.n_kv_head, n_rep, t, hd)  # la testa h appartiene al gruppo h // n_rep
         out = ops.scaled_dot_product_attention(qg, k[:, None], v[:, None], mask)
-        return ops.linear(ops.merge_heads(out.reshape(c.n_head, t, hd)), layer["wo"])
+        return self.linear(ops.merge_heads(out.reshape(c.n_head, t, hd)), layer["wo"])
 
     def forward(self, tokens, cache: KVCache | None = None) -> np.ndarray:
         """Logits [T, vocab] per i token dati. Con una cache, i token proseguono quelli già visti."""
@@ -299,12 +327,14 @@ class Llama:
         for li, layer in enumerate(self.p["layers"]):
             x = x + self.attention(ops.rms_norm(x, layer["attn_norm"], c.norm_eps), layer, li, pos0, cache, mask)
             h = ops.rms_norm(x, layer["mlp_norm"], c.norm_eps)
-            x = x + ops.swiglu_mlp(h, layer["w_gate"], layer["w_up"], layer["w_down"])
+            # SwiGLU (come ops.swiglu_mlp, ma con self.linear per l'eventuale emulazione)
+            x = x + self.linear(ops.silu(self.linear(h, layer["w_gate"])) * self.linear(h, layer["w_up"]),
+                                layer["w_down"])
         x = ops.rms_norm(x, self.p["norm"], c.norm_eps)
 
         if cache is not None:
             cache.length += t
-        return ops.linear(x, self.p["lm_head"])
+        return self.linear(x, self.p["lm_head"])
 
     def generate(self, prompt, n_new: int, eos_ids=(), on_token=None) -> list[int]:
         """Greedy: prefill del prompt in un solo passo, poi decode un token alla volta.

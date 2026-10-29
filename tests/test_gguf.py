@@ -299,15 +299,19 @@ def test_published_gguf_matches_hf():
     assert b.generate(ids, 30) == a.generate(ids, 30)
 
 
-def test_quantized_tensors_not_yet_supported():
+def test_quantized_tensors(tmp_path):
     path = GGUF_DIR / "SmolLM2-135M-Instruct-Q8_0.gguf"
-    if not path.exists():
-        pytest.skip("GGUF Q8_0 non scaricato")
-    f = GGUFFile(path)
-    assert f.tensors["blk.0.attn_q.weight"].type_name == "Q8_0"
-    assert f.raw("blk.0.attn_q.weight").shape == (576, 576 // 32 * 34)
-    with pytest.raises(NotImplementedError):
-        f.get_f32("blk.0.attn_q.weight")
+    if path.exists():
+        f = GGUFFile(path)
+        assert f.tensors["blk.0.attn_q.weight"].type_name == "Q8_0"
+        assert f.raw("blk.0.attn_q.weight").shape == (576, 576 // 32 * 34)  # [righe, byte per riga]
+        assert f.get_f32("blk.0.attn_q.weight").shape == (576, 576)  # dequantizzato (engine/quant.py)
+    # Un tipo che il parser conosce ma che non sappiamo dequantizzare: errore chiaro.
+    w = GGUFWriter(tmp_path / "q4_1.gguf")
+    w.add_raw_tensor("t", (32,), "Q4_1", bytes(20))
+    w.write()
+    with pytest.raises(NotImplementedError, match="Q4_1"):
+        GGUFFile(w.path).get_f32("t")
 
 
 # ---------------------------------------------------------------- regole di rifiuto (identiche nei due parser)

@@ -3,6 +3,8 @@
 Il forward gira interamente in C (csrc/model_llama.c); qui restano il ciclo di generazione,
 la scelta del token e il tokenizer.
 
+Kernel SIMD (AVX2) e thread: vedi set_simd() e il parametro n_threads di Context.
+
 Uso: python -m engine.runtime models/gguf/SmolLM2-135M-Instruct-f16.gguf "The capital of France is" \\
          --tokenizer models/SmolLM2-135M-Instruct -n 40 [--compare]
 """
@@ -16,8 +18,22 @@ import numpy as np
 from engine import capi
 
 
+def simd() -> bool:
+    """True se il runtime usa i kernel AVX2."""
+    return bool(capi.lib().op_simd())
+
+
+def set_simd(enable: bool) -> bool:
+    """Forza i kernel scalari (False) o AVX2 se la CPU li supporta (True). Restituisce lo stato effettivo.
+
+    Da chiamare quando nessun eval è in corso: serve a test e benchmark.
+    """
+    return bool(capi.lib().op_set_simd(int(enable)))
+
+
 class Model:
-    """Pesi letti con mmap da un GGUF (architetture llama e qwen2, pesi F32/F16/BF16)."""
+    """Pesi letti con mmap da un GGUF (architetture llama e qwen2; pesi F32/F16/BF16 o quantizzati
+    Q8_0/Q4_0/Q5_0/Q4_K/Q6_K, quindi anche i file Q8_0 e Q4_K_M)."""
 
     def __init__(self, path):
         self._lib = capi.lib()
@@ -39,7 +55,8 @@ class Model:
 class Context:
     """KV cache e memoria di lavoro di una sessione. Tiene un riferimento al modello."""
 
-    def __init__(self, model: Model, max_seq: int = 2048, n_batch: int = 64, logits_all: bool = False):
+    def __init__(self, model: Model, max_seq: int = 2048, n_batch: int = 64, logits_all: bool = False,
+                 n_threads: int = 0):
         self.model = model
         self._lib = model._lib
         self._h = None
@@ -47,9 +64,11 @@ class Context:
         self.n_batch = n_batch
         self.logits_all = logits_all
         err = ctypes.create_string_buffer(512)
-        self._h = self._lib.engine_ctx_new(model._h, self.max_seq, n_batch, int(logits_all), err, len(err))
+        self._h = self._lib.engine_ctx_new(model._h, self.max_seq, n_batch, int(logits_all), n_threads,
+                                           err, len(err))
         if not self._h:
             raise ValueError(err.value.decode("utf-8", errors="replace"))
+        self.n_threads = self._lib.engine_ctx_n_threads(self._h)  # 0 = uno per core
 
     def __del__(self):
         if self._h:
@@ -116,20 +135,24 @@ def main():
     from engine.ref.llama import _Streamer
     from engine.tokenizer.hf import Tokenizer
 
-    ap = argparse.ArgumentParser(description="Generazione greedy con il runtime C (fp32, scalare)")
-    ap.add_argument("model", help="file .gguf (llama o qwen2, pesi F32/F16/BF16)")
+    ap = argparse.ArgumentParser(description="Generazione greedy con il runtime C")
+    ap.add_argument("model", help="file .gguf (llama o qwen2; F32/F16/BF16, Q8_0, Q4_K_M...)")
     ap.add_argument("prompt")
     ap.add_argument("--tokenizer", required=True, help="cartella HF con tokenizer.json (fino alla Fase 7)")
     ap.add_argument("-n", type=int, default=40, help="token da generare")
     ap.add_argument("--max-seq", type=int, default=1024)
+    ap.add_argument("--threads", type=int, default=0, help="thread di calcolo (0 = uno per core)")
+    ap.add_argument("--no-simd", action="store_true", help="usa i kernel scalari")
     ap.add_argument("--compare", action="store_true", help="confronta i logits con la reference NumPy")
     args = ap.parse_args()
     if args.n < 0:
         ap.error("-n deve essere >= 0")
 
+    if args.no_simd:
+        set_simd(False)
     t0 = time.perf_counter()
     model = Model(args.model)
-    ctx = Context(model, max_seq=args.max_seq)
+    ctx = Context(model, max_seq=args.max_seq, n_threads=args.threads)
     tok = Tokenizer.from_dir(args.tokenizer)
     with GGUFFile(args.model) as gf:
         eos = gf.metadata.get("tokenizer.ggml.eos_token_id")
@@ -137,7 +160,7 @@ def main():
         tok.eos_ids = sorted(set(tok.eos_ids) | {int(eos)})
     i = model.info
     print(f"[runtime C: {i.n_layer} strati, dim {i.dim}, teste {i.n_head}/{i.n_kv_head} kv, "
-          f"caricato in {time.perf_counter() - t0:.2f}s]")
+          f"{ctx.n_threads} thread, {'AVX2' if simd() else 'scalare'}, caricato in {time.perf_counter() - t0:.2f}s]")
 
     ids = tok.encode(args.prompt)
     if not ids:
@@ -146,10 +169,11 @@ def main():
     if args.compare:
         from engine.ref.llama import Llama
 
-        ref = Llama.from_gguf(args.model, max_seq=len(ids))
+        ref = Llama.from_gguf(args.model, max_seq=len(ids), emulate_quant=True)
         c_all = Context(model, max_seq=len(ids), n_batch=len(ids), logits_all=True)
         d = np.abs(c_all.eval(ids) - ref.forward(ids))
-        print(f"[confronto con NumPy sul prompt: max |diff| {d.max():.2e}, media {d.mean():.2e}]")
+        print(f"[confronto con NumPy sul prompt: max |diff| {d.max():.2e}, media {d.mean():.2e} "
+              f"(con pesi quantizzati l'errore delle attivazioni int8 cresce con la profondità)]")
 
     print(args.prompt, end="", flush=True)
     streamer = _Streamer(tok)

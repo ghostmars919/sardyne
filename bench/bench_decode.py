@@ -1,6 +1,7 @@
 """Velocità di prefill e decode: reference NumPy contro runtime C, sullo stesso file GGUF.
 
-Uso: python bench/bench_decode.py models/gguf/SmolLM2-135M-Instruct-f16.gguf [--prompt 64] [--decode 32] [--skip-numpy]
+Uso: python bench/bench_decode.py models/gguf/SmolLM2-135M-Instruct-f16.gguf [--prompt 64] [--decode 32]
+         [--threads 1,4] [--skip-numpy] [--skip-scalar]
 
 Oltre ai token/s stampa la banda "effettiva" del decode: byte dei pesi letti per token × token/s.
 Il decode legge tutti i pesi a ogni token, quindi il suo limite teorico è la banda della RAM
@@ -18,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.loader.gguf import GGUFFile  # noqa: E402
 from engine.ref.llama import Llama  # noqa: E402
-from engine.runtime import Context, Model  # noqa: E402
+from engine.runtime import Context, Model, set_simd  # noqa: E402
 
 
 def weight_bytes_per_token(path, as_f32=False) -> int:
@@ -52,7 +53,9 @@ def main():
     ap.add_argument("model")
     ap.add_argument("--prompt", type=int, default=64)
     ap.add_argument("--decode", type=int, default=32)
+    ap.add_argument("--threads", default="1,4", help="numeri di thread da provare con AVX2")
     ap.add_argument("--skip-numpy", action="store_true")
+    ap.add_argument("--skip-scalar", action="store_true", help="salta i kernel scalari (lenti)")
     args = ap.parse_args()
 
     prompt = list(range(100, 100 + args.prompt))
@@ -60,10 +63,18 @@ def main():
     results = []
 
     model = Model(args.model)
-    ctx = Context(model, max_seq=max_seq, n_batch=64)
-    results.append(bench("runtime C (fp32 scalare, 1 thread)", ctx.eval, lambda t: ctx.eval([t]),
-                         prompt, args.decode) | {"gb": weight_bytes_per_token(args.model) / 1e9})
-    del ctx, model
+    gb_c = weight_bytes_per_token(args.model) / 1e9
+    configs = [] if args.skip_scalar else [(False, 1)]
+    has_simd = set_simd(True)
+    configs += [(True, int(n)) for n in args.threads.split(",")] if has_simd else []
+    for use_simd, n_threads in configs:
+        set_simd(use_simd)
+        ctx = Context(model, max_seq=max_seq, n_batch=64, n_threads=n_threads)
+        name = f"runtime C ({'AVX2' if use_simd else 'scalare'}, {n_threads} thread)"
+        results.append(bench(name, ctx.eval, lambda t, ctx=ctx: ctx.eval([t]), prompt, args.decode) | {"gb": gb_c})
+        del ctx
+    set_simd(True)
+    del model
     gc.collect()
 
     if not args.skip_numpy:

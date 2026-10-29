@@ -8,7 +8,7 @@
  *
  * Uso tipico:
  *   engine_model *m = engine_model_load("model.gguf", err, sizeof err);
- *   engine_ctx *c = engine_ctx_new(m, 2048, 64, 0, err, sizeof err);
+ *   engine_ctx *c = engine_ctx_new(m, 2048, 64, 0, 0, err, sizeof err);
  *   engine_eval(c, prompt, n_prompt);            // prefill
  *   const float *logits = engine_logits(c);      // [n_vocab] dell'ultimo token
  *   ... scelta del token successivo, poi engine_eval(c, &tok, 1) ...   // decode
@@ -41,16 +41,19 @@ typedef struct {
 const char *engine_version(void);
 void engine_add_f32(const float *a, const float *b, float *out, size_t n);
 
-/* Carica un GGUF di architettura "llama" o "qwen2" con pesi F32/F16/BF16. NULL in caso di errore. */
+/* Carica un GGUF di architettura "llama" o "qwen2" con pesi F32/F16/BF16 o quantizzati (Q8_0, Q4_0,
+ * Q5_0, Q4_K, Q6_K: i file Q8_0 e Q4_K_M più diffusi). NULL in caso di errore. */
 engine_model *engine_model_load(const char *path, char *err, size_t err_len);
 void engine_model_free(engine_model *m);
 void engine_model_get_info(const engine_model *m, engine_model_info *out);
 
 /* max_seq: lunghezza massima del contesto (KV cache); n_batch: token elaborati insieme in un
  * passo; logits_all: 1 per avere i logits di ogni token (allora engine_eval accetta al massimo
- * n_batch token per chiamata), 0 per avere solo quelli dell'ultimo. */
+ * n_batch token per chiamata), 0 per avere solo quelli dell'ultimo; n_threads: thread di calcolo
+ * (0 = uno per core). Il risultato non dipende dal numero di thread: è identico bit per bit. */
 engine_ctx *engine_ctx_new(const engine_model *m, int32_t max_seq, int32_t n_batch, int32_t logits_all,
-                           char *err, size_t err_len);
+                           int32_t n_threads, char *err, size_t err_len);
+int32_t engine_ctx_n_threads(const engine_ctx *c);
 void engine_ctx_free(engine_ctx *c);
 
 /* Elabora n token che proseguono quelli già visti. 0 se ok, -1 in caso di errore (contesto

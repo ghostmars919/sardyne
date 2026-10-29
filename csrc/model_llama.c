@@ -15,6 +15,7 @@
 
 #include "gguf.h"
 #include "ops.h"
+#include "threadpool.h"
 
 #define MAX_SEQ_LIMIT (1 << 20)
 #define MAX_BATCH_LIMIT 4096
@@ -22,7 +23,7 @@
 
 typedef struct {
     const void *data; /* dentro la mmap */
-    int type;         /* OP_F32 / OP_F16 / OP_BF16 */
+    int type;         /* OP_F32, OP_F16, OP_BF16 o un tipo quantizzato (OP_Q8_0, OP_Q4_K, ...) */
 } matrix;
 
 typedef struct {
@@ -43,10 +44,17 @@ struct engine_model {
 struct engine_ctx {
     const engine_model *m;
     int max_seq, n_batch, logits_all, n_past, n_logits;
+    int n_threads;
+    threadpool *pool;
     void *arena;
     float *k_cache, *v_cache; /* [n_layer][n_kv_head][max_seq][head_dim] */
     float *rope_cos, *rope_sin; /* [max_seq][head_dim/2] */
     float *x, *xb, *q, *k, *v, *att, *hb, *hb2, *scores, *logits;
+    /* Attivazioni quantizzate per i pesi quantizzati: [0] in Q8_0, [1] in Q8_K. Si quantizzano
+     * una volta e servono a tutte le matmul con lo stesso ingresso (q, k, v; gate e up). */
+    void *xq[2];
+    const float *xq_src[2];
+    int xq_n_tok[2], xq_n_in[2];
     char err[256];
 };
 
@@ -155,9 +163,9 @@ static int get_matrix(const gguf_file *gf, const char *name, int n_in, int n_out
                 (unsigned long long)t->ne[0], (unsigned long long)t->ne[1], n_in, n_out);
         return -1;
     }
-    if (!op_type_size((int)t->type)) {
-        set_err(err, err_len, "%s: tipo %s non ancora supportato dal runtime (quantizzazione: Fase 5)",
-                name, gguf_type_name(t->type));
+    if (!op_type_supported((int)t->type)) {
+        set_err(err, err_len, "%s: tipo %s non supportato dal runtime (supportati: F32, F16, BF16, Q8_0, "
+                "Q4_0, Q5_0, Q4_K, Q6_K)", name, gguf_type_name(t->type));
         return -1;
     }
     out->data = t->data;
@@ -176,7 +184,7 @@ static int get_vector(const gguf_file *gf, const char *name, int n, float *dst, 
         set_err(err, err_len, "%s: dimensione %llu, attesa %d", name, (unsigned long long)t->ne[0], n);
         return -1;
     }
-    if (!op_type_size((int)t->type)) {
+    if (!op_type_supported((int)t->type)) {
         set_err(err, err_len, "%s: tipo %s non supportato", name, gguf_type_name(t->type));
         return -1;
     }
@@ -381,12 +389,18 @@ static void layout(engine_ctx *c, arena *a) {
     c->att = arena_floats(a, B * q_dim);
     c->hb = arena_floats(a, B * in->ffn_dim);
     c->hb2 = arena_floats(a, B * in->ffn_dim);
-    c->scores = arena_floats(a, S);
+    c->scores = arena_floats(a, S * (size_t)c->n_threads); /* uno spazio per thread */
     c->logits = arena_floats(a, (c->logits_all ? B : 1) * (size_t)in->n_vocab);
+    /* Ingresso più lungo di una matmul, arrotondato ai blocchi da 32 e 256. */
+    size_t max_in = (size_t)in->dim > q_dim ? (size_t)in->dim : q_dim;
+    if ((size_t)in->ffn_dim > max_in) max_in = (size_t)in->ffn_dim;
+    size_t row0 = (max_in + 31) / 32 * 34, rowk = (max_in + 255) / 256 * 292;
+    c->xq[0] = arena_floats(a, (B * row0 + 3) / 4);
+    c->xq[1] = arena_floats(a, (B * rowk + 3) / 4);
 }
 
 engine_ctx *engine_ctx_new(const engine_model *m, int32_t max_seq, int32_t n_batch, int32_t logits_all,
-                           char *err, size_t err_len) {
+                           int32_t n_threads, char *err, size_t err_len) {
     if (err && err_len) err[0] = '\0';
     if (!m) {
         set_err(err, err_len, "modello NULL");
@@ -401,6 +415,10 @@ engine_ctx *engine_ctx_new(const engine_model *m, int32_t max_seq, int32_t n_bat
         set_err(err, err_len, "n_batch=%d non valido (1..%d)", n_batch, MAX_BATCH_LIMIT);
         return NULL;
     }
+    if (n_threads < 0 || n_threads > 256) {
+        set_err(err, err_len, "n_threads=%d non valido (0..256)", n_threads);
+        return NULL;
+    }
     engine_ctx *c = calloc(1, sizeof(*c));
     if (!c) {
         set_err(err, err_len, "memoria esaurita");
@@ -410,17 +428,25 @@ engine_ctx *engine_ctx_new(const engine_model *m, int32_t max_seq, int32_t n_bat
     c->max_seq = max_seq;
     c->n_batch = n_batch;
     c->logits_all = logits_all != 0;
+    c->n_threads = n_threads ? n_threads : tp_default_threads();
+    if (!(c->pool = tp_new(c->n_threads))) {
+        set_err(err, err_len, "impossibile creare %d thread", c->n_threads);
+        free(c);
+        return NULL;
+    }
 
     arena a = {0};
     layout(c, &a); /* primo passaggio: solo conteggio */
     if (a.overflow) {
         set_err(err, err_len, "contesto troppo grande");
+        tp_free(c->pool);
         free(c);
         return NULL;
     }
     size_t size = (a.used + ALIGN - 1) / ALIGN * ALIGN;
     if (posix_memalign(&c->arena, ALIGN, size) != 0) {
         set_err(err, err_len, "memoria esaurita (%.1f MB per contesto e KV cache)", size / 1e6);
+        tp_free(c->pool);
         free(c);
         return NULL;
     }
@@ -432,8 +458,124 @@ engine_ctx *engine_ctx_new(const engine_model *m, int32_t max_seq, int32_t n_bat
 
 void engine_ctx_free(engine_ctx *c) {
     if (!c) return;
+    tp_free(c->pool);
     free(c->arena);
     free(c);
+}
+
+int32_t engine_ctx_n_threads(const engine_ctx *c) { return c ? c->n_threads : 0; }
+
+/* ---------------------------------------------------------------- operazioni parallele
+ *
+ * Ogni operazione divide il lavoro in parti contigue, una per thread, e ogni elemento del
+ * risultato è calcolato da un solo thread con la stessa sequenza di operazioni: per questo il
+ * risultato è identico qualunque sia il numero di thread. */
+
+static void split(int n, int ith, int nth, int *begin, int *end) {
+    *begin = (int)((long long)n * ith / nth);
+    *end = (int)((long long)n * (ith + 1) / nth);
+}
+
+typedef struct {
+    float *out;
+    const float *x;
+    const matrix *w;
+    int n_tok, n_in, n_out;
+} matmul_job;
+
+static void matmul_worker(void *arg, int ith, int nth) {
+    const matmul_job *j = arg;
+    int p0, p1; /* a coppie di righe: il micro-kernel lavora su 2 righe alla volta */
+    split((j->n_out + 1) / 2, ith, nth, &p0, &p1);
+    int r1 = 2 * p1 < j->n_out ? 2 * p1 : j->n_out;
+    if (2 * p0 < r1) op_matmul_rows(j->out, j->x, j->w->data, j->w->type, j->n_tok, j->n_in, j->n_out, 2 * p0, r1);
+}
+
+typedef struct {
+    float *out;
+    const void *xq;
+    const matrix *w;
+    int n_tok, n_in, n_out;
+} matmul_q_job;
+
+static void matmul_q_worker(void *arg, int ith, int nth) {
+    const matmul_q_job *j = arg;
+    int r0, r1;
+    split(j->n_out, ith, nth, &r0, &r1);
+    if (r0 < r1) op_matmul_q_rows(j->out, j->xq, j->w->data, j->w->type, j->n_tok, j->n_in, j->n_out, r0, r1);
+}
+
+typedef struct {
+    int vtype;
+    const float *x;
+    void *xq;
+    int n_tok, n_in;
+} quantize_job;
+
+static void quantize_worker(void *arg, int ith, int nth) {
+    const quantize_job *j = arg;
+    int t0, t1;
+    split(j->n_tok, ith, nth, &t0, &t1);
+    if (t0 < t1) op_quantize_rows(j->vtype, j->x, j->xq, j->n_in, t0, t1);
+}
+
+/* out = x · Wᵀ. new_input = 1 quando x è cambiato dall'ultima chiamata: con pesi quantizzati le
+ * attivazioni quantizzate si riusano finché l'ingresso è lo stesso (q, k, v; gate e up). */
+static void matmul(engine_ctx *c, float *out, const float *x, const matrix *w, int n_tok, int n_in, int n_out,
+                   int new_input) {
+    if (new_input) c->xq_src[0] = c->xq_src[1] = NULL;
+    int vt = op_vec_dot_type(w->type);
+    if (vt == OP_F32) {
+        matmul_job j = {out, x, w, n_tok, n_in, n_out};
+        tp_run(c->pool, matmul_worker, &j);
+        return;
+    }
+    int s = vt == OP_Q8_0 ? 0 : 1;
+    if (c->xq_src[s] != x || c->xq_n_tok[s] != n_tok || c->xq_n_in[s] != n_in) {
+        quantize_job qj = {vt, x, c->xq[s], n_tok, n_in};
+        tp_run(c->pool, quantize_worker, &qj);
+        c->xq_src[s] = x;
+        c->xq_n_tok[s] = n_tok;
+        c->xq_n_in[s] = n_in;
+    }
+    matmul_q_job j = {out, c->xq[s], w, n_tok, n_in, n_out};
+    tp_run(c->pool, matmul_q_worker, &j);
+}
+
+typedef struct {
+    engine_ctx *c;
+    const float *kc, *vc;
+    int n_tok, pos0;
+} attention_job;
+
+static void attention_worker(void *arg, int ith, int nth) {
+    const attention_job *j = arg;
+    const engine_model_info *in = &j->c->m->info;
+    int hd = in->head_dim, q_dim = in->n_head * hd, n_rep = in->n_head / in->n_kv_head;
+    size_t head_stride = (size_t)j->c->max_seq * hd;
+    float *scores = j->c->scores + (size_t)ith * j->c->max_seq;
+    int b, e; /* coppie (token, testa), indipendenti tra loro */
+    split(j->n_tok * in->n_head, ith, nth, &b, &e);
+    for (int task = b; task < e; task++) {
+        int t = task / in->n_head, h = task % in->n_head;
+        size_t kv = (size_t)(h / n_rep) * head_stride;
+        /* Il token t vede le posizioni 0..pos0+t: è la maschera causale. */
+        op_attention_head(j->c->att + (size_t)t * q_dim + (size_t)h * hd, j->c->q + (size_t)t * q_dim + (size_t)h * hd,
+                          j->kc + kv, j->vc + kv, hd, j->pos0 + t + 1, scores);
+    }
+}
+
+typedef struct {
+    float *gate;
+    const float *up;
+    int n;
+} silu_job;
+
+static void silu_worker(void *arg, int ith, int nth) {
+    const silu_job *j = arg;
+    int b, e;
+    split(j->n, ith, nth, &b, &e);
+    op_silu_mul(j->gate + b, j->up + b, e - b);
 }
 
 /* ---------------------------------------------------------------- forward */
@@ -448,7 +590,7 @@ static void forward(engine_ctx *c, const int32_t *tok, int n, int out_rows) {
     int pos0 = c->n_past;
     size_t head_stride = (size_t)c->max_seq * hd; /* tra due teste KV nella cache */
     size_t layer_stride = (size_t)in->n_kv_head * head_stride;
-    size_t emb_row = (size_t)dim * op_type_size(m->tok_embd.type);
+    size_t emb_row = op_row_size(m->tok_embd.type, dim);
 
     for (int t = 0; t < n; t++)
         op_row_to_f32((const uint8_t *)m->tok_embd.data + (size_t)tok[t] * emb_row, m->tok_embd.type,
@@ -461,9 +603,9 @@ static void forward(engine_ctx *c, const int32_t *tok, int n, int out_rows) {
         /* --- attenzione: x = x + Wo · Attn(RoPE(Wq·norm(x)), RoPE(Wk·norm(x)), Wv·norm(x)) */
         for (int t = 0; t < n; t++)
             op_rmsnorm(c->xb + (size_t)t * dim, c->x + (size_t)t * dim, L->attn_norm, dim, in->norm_eps);
-        op_matmul(c->q, c->xb, L->wq.data, L->wq.type, n, dim, q_dim);
-        op_matmul(c->k, c->xb, L->wk.data, L->wk.type, n, dim, kv_dim);
-        op_matmul(c->v, c->xb, L->wv.data, L->wv.type, n, dim, kv_dim);
+        matmul(c, c->q, c->xb, &L->wq, n, dim, q_dim, 1);
+        matmul(c, c->k, c->xb, &L->wk, n, dim, kv_dim, 0);
+        matmul(c, c->v, c->xb, &L->wv, n, dim, kv_dim, 0);
         if (L->bq) {
             op_add_bias(c->q, L->bq, n, q_dim);
             op_add_bias(c->k, L->bk, n, kv_dim);
@@ -480,20 +622,19 @@ static void forward(engine_ctx *c, const int32_t *tok, int n, int out_rows) {
                 memcpy(vc + h * head_stride + (size_t)pos * hd, vt + (size_t)h * hd, (size_t)hd * sizeof(float));
             }
         }
-        /* Il token t vede le posizioni 0..pos0+t: è la maschera causale. */
-        for (int t = 0; t < n; t++)
-            op_attention(c->att + (size_t)t * q_dim, c->q + (size_t)t * q_dim, kc, vc, in->n_head,
-                         in->n_kv_head, hd, pos0 + t + 1, c->max_seq, c->scores);
-        op_matmul(c->xb, c->att, L->wo.data, L->wo.type, n, q_dim, dim);
+        attention_job aj = {c, kc, vc, n, pos0};
+        tp_run(c->pool, attention_worker, &aj);
+        matmul(c, c->xb, c->att, &L->wo, n, q_dim, dim, 1);
         for (size_t i = 0; i < (size_t)n * dim; i++) c->x[i] += c->xb[i];
 
         /* --- MLP SwiGLU: x = x + down(silu(gate·norm(x)) * up·norm(x)) */
         for (int t = 0; t < n; t++)
             op_rmsnorm(c->xb + (size_t)t * dim, c->x + (size_t)t * dim, L->ffn_norm, dim, in->norm_eps);
-        op_matmul(c->hb, c->xb, L->gate.data, L->gate.type, n, dim, in->ffn_dim);
-        op_matmul(c->hb2, c->xb, L->up.data, L->up.type, n, dim, in->ffn_dim);
-        op_silu_mul(c->hb, c->hb2, n * in->ffn_dim);
-        op_matmul(c->xb, c->hb, L->down.data, L->down.type, n, in->ffn_dim, dim);
+        matmul(c, c->hb, c->xb, &L->gate, n, dim, in->ffn_dim, 1);
+        matmul(c, c->hb2, c->xb, &L->up, n, dim, in->ffn_dim, 0);
+        silu_job sj = {c->hb, c->hb2, n * in->ffn_dim};
+        tp_run(c->pool, silu_worker, &sj);
+        matmul(c, c->xb, c->hb, &L->down, n, in->ffn_dim, dim, 1);
         for (size_t i = 0; i < (size_t)n * dim; i++) c->x[i] += c->xb[i];
     }
 
@@ -503,7 +644,7 @@ static void forward(engine_ctx *c, const int32_t *tok, int n, int out_rows) {
         const float *xs = c->x + (size_t)(n - out_rows) * dim;
         for (int r = 0; r < out_rows; r++)
             op_rmsnorm(c->xb + (size_t)r * dim, xs + (size_t)r * dim, m->output_norm, dim, in->norm_eps);
-        op_matmul(c->logits, c->xb, m->output.data, m->output.type, out_rows, dim, in->n_vocab);
+        matmul(c, c->logits, c->xb, &m->output, out_rows, dim, in->n_vocab, 1);
     }
     c->n_past += n;
 }

@@ -22,12 +22,14 @@ from pathlib import Path
 
 import numpy as np
 
+from engine import quant
 from engine.loader import hf_config
 from engine.loader.gguf_writer import GGUFWriter, f32_to_bf16
 from engine.loader.safetensors import SafeTensorsDir
 
 HF_TO_GGUF_ARCH = {"LlamaForCausalLM": "llama", "Qwen2ForCausalLM": "qwen2"}
-FILE_TYPE = {"f32": 0, "f16": 1, "bf16": 32}  # general.file_type (enum llama_ftype)
+FILE_TYPE = {"f32": 0, "f16": 1, "q4_0": 2, "q8_0": 7, "bf16": 32}  # general.file_type (enum llama_ftype)
+QUANT_TYPES = {"q8_0": "Q8_0", "q4_0": "Q4_0"}
 F16_MAX = float(np.finfo(np.float16).max)
 
 # nome HF (dentro model.layers.N.) -> nome GGUF (dentro blk.N.)
@@ -72,10 +74,25 @@ def gguf_name(hf_name: str) -> str | None:
     return None
 
 
+def target_type(shape, outtype: str) -> str:
+    """Tipo ggml di un tensore. Vettori sempre F32; con q8_0/q4_0, le matrici con righe non
+    multiple di 32 restano in F16 (come i ripieghi di llama-quantize)."""
+    if len(shape) == 1 or outtype == "f32":
+        return "F32"
+    if outtype in QUANT_TYPES:
+        return QUANT_TYPES[outtype] if shape[-1] % quant.QK[QUANT_TYPES[outtype]] == 0 else "F16"
+    return {"f16": "F16", "bf16": "BF16"}[outtype]
+
+
 def _encode(name: str, data: np.ndarray, outtype: str) -> tuple[str, np.ndarray]:
     """Tipo ggml e dati codificati per un tensore."""
-    if data.ndim == 1 or outtype == "f32":
+    kind = target_type(data.shape, outtype)
+    if kind == "F32":
         return "F32", data.astype(np.float32)
+    if kind in quant.QK:
+        return kind, np.frombuffer(quant.quantize(data, kind), dtype=np.uint8)
+    if kind == "F16" and outtype != "f16":
+        outtype = "f16"  # ripiego di una matrice non quantizzabile
     if outtype == "f16":
         big = float(np.abs(data).max()) if data.size else 0.0
         if big > F16_MAX:  # (i NaN non superano il confronto e restano NaN, senza diventare inf)
@@ -129,7 +146,7 @@ def convert(hf_dir, out_path, outtype: str = "bf16"):
         if name is None or (name == "output.weight" and tied):
             continue
         shape = st.shape(hf_name)
-        ggml_type = "F32" if len(shape) == 1 or outtype == "f32" else {"f16": "F16", "bf16": "BF16"}[outtype]
+        ggml_type = target_type(shape, outtype)
 
         def produce(hf_name=hf_name, name=name):
             data = st.get_f32(hf_name)

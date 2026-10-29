@@ -3,7 +3,8 @@
 #   make              build ottimizzata in build/
 #   make debug        build con ASan/UBSan in build/debug/ (non tocca quella normale)
 #   make test         test Python con la build normale
-#   make test-asan    test del parser GGUF con la build ASan/UBSan (Linux, gcc)
+#   make test-asan    test del parser GGUF e del runtime con la build ASan/UBSan (Linux, gcc)
+#   make test-tsan    test multithread del runtime con ThreadSanitizer (lento, qualche minuto)
 #   make ARCHFLAGS=   build portabile, senza -march=native
 
 # GNU make definisce CC=cc di default: "CC ?= gcc" non avrebbe effetto.
@@ -11,7 +12,7 @@ ifeq ($(origin CC),default)
   CC := gcc
 endif
 ARCHFLAGS ?= -march=native
-CFLAGS    ?= -std=c11 -O3 $(ARCHFLAGS) -Wall -Wextra -fPIC
+CFLAGS    ?= -std=c11 -O3 $(ARCHFLAGS) -ffp-contract=off -Wall -Wextra -fPIC
 LDFLAGS   ?= -lm -lpthread
 PYTHON    ?= .venv/bin/python
 BUILD     ?= build
@@ -29,7 +30,7 @@ HDRS := $(wildcard csrc/*.h)
 FLAGS_STAMP := $(BUILD)/.flags
 FLAGS_LINE  := $(CC) $(CFLAGS) $(LDFLAGS)
 
-all: $(LIB) $(BUILD)/gguf-info
+all: $(LIB) $(BUILD)/gguf-info $(BUILD)/membw
 
 $(FLAGS_STAMP): FORCE
 	@mkdir -p $(BUILD)
@@ -40,6 +41,9 @@ $(LIB): $(SRCS) $(HDRS) $(FLAGS_STAMP)
 
 $(BUILD)/gguf-info: tools/gguf_info.c csrc/gguf.c csrc/gguf.h $(FLAGS_STAMP)
 	$(CC) $(CFLAGS) tools/gguf_info.c csrc/gguf.c -o $@ $(LDFLAGS)
+
+$(BUILD)/membw: tools/membw.c csrc/threadpool.c csrc/threadpool.h $(FLAGS_STAMP)
+	$(CC) $(CFLAGS) tools/membw.c csrc/threadpool.c -o $@ $(LDFLAGS)
 
 debug:
 	$(MAKE) BUILD=build/debug ARCHFLAGS= \
@@ -55,9 +59,16 @@ test-asan: debug
 	LD_PRELOAD="$$($(CC) -print-file-name=libasan.so) $$($(CC) -print-file-name=libubsan.so)" \
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 	LLM_ENGINE_LIB=build/debug/libengine.so \
-	$(PYTHON) -m pytest -q -p no:cacheprovider tests/test_gguf.py tests/test_capi.py tests/test_runtime.py -k "not real_model"
+	$(PYTHON) -m pytest -q -p no:cacheprovider tests/test_gguf.py tests/test_capi.py tests/test_runtime.py tests/test_quant.py -k "not real_model and not real_quantized"
+
+test-tsan:
+	$(MAKE) BUILD=build/tsan ARCHFLAGS= CFLAGS="-std=c11 -O1 -g -Wall -Wextra -fPIC -fsanitize=thread" \
+		LDFLAGS="-lm -lpthread -fsanitize=thread" build/tsan/libengine.so
+	LD_PRELOAD="$$($(CC) -print-file-name=libtsan.so)" TSAN_OPTIONS="halt_on_error=1 report_signal_unsafe=0" \
+	LLM_ENGINE_LIB=build/tsan/libengine.so \
+	$(PYTHON) -m pytest -q -p no:cacheprovider tests/test_runtime.py -k "thread or batching"
 
 clean:
 	rm -rf build
 
-.PHONY: all debug test test-asan clean FORCE
+.PHONY: all debug test test-asan test-tsan clean FORCE

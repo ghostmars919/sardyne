@@ -13,7 +13,7 @@ from engine.loader.convert import convert  # noqa: E402
 from engine.loader.gguf_writer import f32_to_bf16  # noqa: E402
 from engine.ref import ops  # noqa: E402
 from engine.ref.llama import Llama  # noqa: E402
-from engine.runtime import Context, Model, generate  # noqa: E402
+from engine.runtime import Context, Model, generate, set_simd, simd  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 GGUF_DIR = ROOT / "models" / "gguf"
@@ -29,6 +29,19 @@ def ptr(a: np.ndarray) -> int:
     return a.ctypes.data
 
 
+HAS_SIMD = set_simd(True)
+
+
+@pytest.fixture(params=[False, True], ids=["scalare", "avx2"])
+def kernels(request):
+    """Esegue il test con i kernel scalari e con quelli AVX2 (se la CPU li ha)."""
+    if request.param and not HAS_SIMD:
+        pytest.skip("CPU senza AVX2/FMA/F16C")
+    assert set_simd(request.param) == request.param
+    yield request.param
+    set_simd(True)
+
+
 # ---------------------------------------------------------------- kernel
 
 def test_f16_conversion_all_values():
@@ -42,10 +55,11 @@ def test_f16_conversion_all_values():
 
 
 @pytest.mark.parametrize("wtype", [F32, F16, BF16], ids=["f32", "f16", "bf16"])
-@pytest.mark.parametrize("n_tok", [1, 5])
-def test_matmul(wtype, n_tok):
+@pytest.mark.parametrize("n_tok", [1, 2, 3, 4, 5, 8, 9])  # resti dei blocchi da 4 token
+@pytest.mark.parametrize("n_in", [67, 96])  # con e senza coda non multipla di 8 e di 32
+def test_matmul(kernels, wtype, n_tok, n_in):
     rng = np.random.default_rng(0)
-    n_in, n_out = 67, 45  # dimensioni dispari: nessuna ipotesi sulla lunghezza dei vettori
+    n_out = 45  # dispari: l'ultima riga resta fuori dalle coppie del micro-kernel
     x = rng.standard_normal((n_tok, n_in)).astype(np.float32)
     w32 = rng.standard_normal((n_out, n_in)).astype(np.float32)
     if wtype == F16:
@@ -59,6 +73,28 @@ def test_matmul(wtype, n_tok):
     out = np.empty((n_tok, n_out), np.float32)
     lib().op_matmul(ptr(out), ptr(x), ptr(w), wtype, n_tok, n_in, n_out)
     np.testing.assert_allclose(out, x @ w_ref.T, rtol=1e-5, atol=1e-5)
+
+    # Righe calcolate a pezzi (come fanno i thread): stesso risultato, bit per bit.
+    parts = np.full_like(out, np.nan)
+    for r0, r1 in [(0, 10), (10, 30), (30, n_out)]:
+        lib().op_matmul_rows(ptr(parts), ptr(x), ptr(w), wtype, n_tok, n_in, n_out, r0, r1)
+    assert np.array_equal(parts, out)
+
+
+@pytest.mark.parametrize("n", [1, 7, 8, 64, 100])
+def test_dot_and_axpy(kernels, n):
+    rng = np.random.default_rng(4)
+    a, b = rng.standard_normal((2, n)).astype(np.float32)
+    assert lib().op_dot_f32(ptr(a), ptr(b), n) == pytest.approx(float(a.astype(np.float64) @ b), rel=1e-5, abs=1e-5)
+    y = rng.standard_normal(n).astype(np.float32)
+    expected = y + np.float32(0.5) * a
+    lib().op_axpy(ptr(y), 0.5, ptr(a), n)
+    np.testing.assert_allclose(y, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_simd_selection():
+    assert set_simd(False) is False and simd() is False
+    assert set_simd(True) == HAS_SIMD
 
 
 def test_rmsnorm_softmax_silu():
@@ -100,7 +136,7 @@ def test_rope(interleaved):
     np.testing.assert_allclose(x, expected, rtol=1e-5, atol=1e-6)
 
 
-def test_attention_gqa():
+def test_attention_gqa(kernels):
     rng = np.random.default_rng(3)
     n_head, n_kv_head, hd, stride, n_kv = 6, 2, 8, 20, 13  # cache con 20 posti, 13 occupati
     q = rng.standard_normal((n_head, hd)).astype(np.float32)
@@ -123,7 +159,9 @@ TOKENS = [3, 14, 15, 9, 26, 5, 35, 8, 2, 7, 1, 60]
 
 @pytest.fixture(scope="module", params=[
     ("llama", "f32"), ("llama", "f16"), ("llama", "bf16"),
-    ("llama-bias-headdim", "bf16"), ("qwen2", "f32"), ("qwen2", "bf16")], ids=lambda p: "-".join(p))
+    ("llama-bias-headdim", "bf16"), ("qwen2", "f32"), ("qwen2", "bf16"),
+    ("llama", "q8_0"), ("llama", "q4_0"), ("llama-bias-headdim", "q8_0"), ("qwen2", "q4_0")],
+    ids=lambda p: "-".join(p))
 def synthetic(request, tmp_path_factory):
     from test_convert import make_hf
 
@@ -137,10 +175,38 @@ def synthetic(request, tmp_path_factory):
     return path
 
 
-def test_forward_matches_numpy(synthetic):
-    ref = Llama.from_gguf(synthetic, max_seq=32).forward(TOKENS)
+def test_forward_matches_numpy(synthetic, kernels):
+    # Con pesi quantizzati il riferimento emula anche le attivazioni int8 del runtime: su 2 strati
+    # la differenza resta all'ordine dell'arrotondamento fp32.
+    ref = Llama.from_gguf(synthetic, max_seq=32, emulate_quant=True).forward(TOKENS)
     ctx = Context(Model(synthetic), max_seq=32, n_batch=len(TOKENS), logits_all=True)
     np.testing.assert_allclose(ctx.eval(TOKENS), ref, atol=1e-4, rtol=0)
+
+
+def test_results_do_not_depend_on_thread_count(synthetic):
+    model = Model(synthetic)
+    outs = []
+    for n_threads in (1, 2, 3, 4, 7):
+        ctx = Context(model, max_seq=32, n_batch=len(TOKENS), logits_all=True, n_threads=n_threads)
+        assert ctx.n_threads == n_threads
+        logits = ctx.eval(TOKENS[:8])
+        outs.append(np.concatenate([logits, ctx.eval(TOKENS[8:])]))  # prefill + seguito
+    for o in outs[1:]:
+        assert np.array_equal(o, outs[0])  # bit per bit
+
+
+def test_many_threads_stress(synthetic):
+    # Più thread che core e molte operazioni brevi: cerca race nel thread pool.
+    model = Model(synthetic)
+    ref = Context(model, max_seq=32, n_threads=1)
+    ctx = Context(model, max_seq=32, n_threads=8)
+    for _ in range(20):
+        ref.reset()
+        ctx.reset()
+        a, b = ref.eval(TOKENS[:6]), ctx.eval(TOKENS[:6])
+        for t in TOKENS[6:]:
+            a, b = ref.eval([t]), ctx.eval([t])
+        assert np.array_equal(a, b)
 
 
 def test_info_matches_numpy_config(synthetic):
@@ -171,7 +237,7 @@ def test_kv_cache_and_batching(synthetic):
 
 
 def test_generate_matches_numpy(synthetic):
-    ref = Llama.from_gguf(synthetic, max_seq=32)
+    ref = Llama.from_gguf(synthetic, max_seq=32, emulate_quant=True)
     ctx = Context(Model(synthetic), max_seq=32)
     assert generate(ctx, TOKENS[:4], 12) == ref.generate(TOKENS[:4], 12)
     assert generate(ctx, TOKENS[:4], 0) == []
@@ -191,17 +257,15 @@ def test_errors_leave_context_unchanged(synthetic):
         Context(model, max_seq=8, n_batch=0)
     with pytest.raises(ValueError, match="max_seq"):
         Context(model, max_seq=0)
+    with pytest.raises(ValueError, match="n_threads"):
+        Context(model, max_seq=8, n_threads=-1)
     all_ctx = Context(model, max_seq=16, n_batch=2, logits_all=True)
     assert all_ctx.eval([1, 2, 3, 4, 5]).shape == (5, model.info.n_vocab)  # Python divide in blocchi
 
 
-def test_unsupported_files_are_rejected(tmp_path):
+def test_missing_file_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="impossibile aprire"):
         Model(tmp_path / "manca.gguf")
-    q8 = GGUF_DIR / "SmolLM2-135M-Instruct-Q8_0.gguf"
-    if q8.exists():
-        with pytest.raises(ValueError, match="Fase 5"):
-            Model(q8)
 
 
 def test_rope_freqs_and_unknown_tensors_are_rejected(tmp_path):
@@ -244,5 +308,57 @@ def test_real_model_matches_numpy(name):
     gc.collect()
     model = Model(path)
     ctx = Context(model, max_seq=64, n_batch=len(ids), logits_all=True)
-    np.testing.assert_allclose(ctx.eval(ids), ref_logits, atol=1e-3, rtol=0)
+    logits = ctx.eval(ids)
+    np.testing.assert_allclose(logits, ref_logits, atol=1e-3, rtol=0)
     assert generate(Context(model, max_seq=64), ids, 20) == ref_gen
+    one = Context(model, max_seq=64, n_batch=len(ids), logits_all=True, n_threads=1).eval(ids)
+    assert np.array_equal(one, logits)  # 1 thread o tutti: stesso risultato
+
+
+# ---------------------------------------------------------------- modelli quantizzati reali (Fase 5)
+
+QUANT_FILES = {"SmolLM2-135M-Instruct-Q8_0.gguf": PROMPT_IDS["SmolLM2-135M-Instruct-f16.gguf"],
+               "SmolLM2-135M-Instruct-Q4_K_M.gguf": PROMPT_IDS["SmolLM2-135M-Instruct-f16.gguf"],
+               "qwen2.5-0.5b-instruct-q8_0.gguf": PROMPT_IDS["qwen2.5-0.5b-instruct-fp16.gguf"],
+               "qwen2.5-0.5b-instruct-q4_k_m.gguf": PROMPT_IDS["qwen2.5-0.5b-instruct-fp16.gguf"]}
+
+
+@pytest.mark.parametrize("name", sorted(QUANT_FILES))
+def test_real_quantized_model(name):
+    """Su 24-30 strati l'errore delle attivazioni int8 si amplifica (anche in NumPy, una perturbazione
+    di un ulp sposta i logits di decimi): si verificano il token più probabile e il determinismo."""
+    path = GGUF_DIR / name
+    if not path.exists():
+        pytest.skip(f"{name} non scaricato")
+    ids = QUANT_FILES[name]
+    ref = Llama.from_gguf(path, max_seq=64, emulate_quant=True).forward(ids)
+    gc.collect()
+    model = Model(path)
+    logits = Context(model, max_seq=64, n_batch=len(ids), logits_all=True).eval(ids)
+    assert np.mean(logits.argmax(-1) == ref.argmax(-1)) >= 0.8
+    assert np.abs(logits - ref).mean() < 0.5
+    one = Context(model, max_seq=64, n_batch=len(ids), logits_all=True, n_threads=1).eval(ids)
+    assert np.array_equal(one, logits)  # 1 thread o tutti: identici bit per bit
+
+
+def test_unsupported_quant_type_is_rejected(tmp_path):
+    from engine.loader.gguf import GGUFFile, VALUE_TYPES
+    from engine.loader.gguf_writer import GGUFWriter
+    from test_convert import make_hf
+
+    hf = make_hf(tmp_path / "hf")
+    src_path = tmp_path / "m.gguf"
+    convert(hf, src_path, "f32")
+    src = GGUFFile(src_path)
+    w = GGUFWriter(tmp_path / "q4_1.gguf")
+    for k, v in src.metadata.items():
+        vt, et = src.metadata_types[k]
+        w.add(k, v, VALUE_TYPES[vt][0], VALUE_TYPES[et][0] if et is not None else None)
+    for name, t in src.tensors.items():
+        if name == "blk.0.attn_q.weight":  # Q4_1: 32 valori in 20 byte, non supportato
+            w.add_raw_tensor(name, t.ne, "Q4_1", bytes(t.n_elements // 32 * 20))
+        else:
+            w.add_tensor(name, src.get_f32(name), "F32")
+    w.write()
+    with pytest.raises(ValueError, match="Q4_1 non supportato"):
+        Model(w.path)

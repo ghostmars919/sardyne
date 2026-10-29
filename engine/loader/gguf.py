@@ -27,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
+from engine import quant
 from engine.loader.safetensors import bf16_to_f32
 
 GGUF_MAGIC = b"GGUF"
@@ -245,7 +246,7 @@ class GGUFFile:
         """Vista senza copie sui dati del tensore.
 
         F32/F16/BF16 (BF16 come uint16): shape NumPy del tensore.
-        Tipi quantizzati: uint8 [righe, byte per riga] (la decodifica arriva in Fase 5).
+        Tipi quantizzati: uint8 [righe, byte per riga] (decodifica: get_f32, engine/quant.py).
         """
         if self._mm is None:
             raise ValueError("file GGUF già chiuso")
@@ -267,7 +268,9 @@ class GGUFFile:
             return a.astype(np.float32)
         if t.type_name == "BF16":
             return bf16_to_f32(a)
-        raise NotImplementedError(f"{name}: dequantizzazione {t.type_name} non ancora implementata (Fase 5)")
+        if t.type_name in quant.DEQUANT:
+            return quant.dequantize(a, t.type_name, t.shape)
+        raise NotImplementedError(f"{name}: tipo {t.type_name} non supportato")
 
 
 def _fmt_value(v, limit=6) -> str:
