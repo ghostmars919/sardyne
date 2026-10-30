@@ -82,6 +82,11 @@ class Context:
     def reset(self):
         self._lib.engine_reset(self._h)
 
+    def truncate(self, n: int):
+        """Torna alla posizione n: i primi n token restano nella KV cache."""
+        if self._lib.engine_truncate(self._h, n) != 0:
+            raise ValueError(self._lib.engine_last_error(self._h).decode("utf-8", errors="replace"))
+
     def eval(self, tokens) -> np.ndarray:
         """Logits (copia) [n_token, vocab] con logits_all, altrimenti [vocab] dell'ultimo token.
 

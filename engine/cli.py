@@ -95,7 +95,7 @@ def main():
             print(think.finish(), end="")
         messages.append({"role": "assistant", "content": "".join(reply)})
         s = engine.stats
-        print(f"\n[{s.prompt_tokens} token di prompt, {s.completion_tokens} generati, "
+        print(f"\n[{s.prompt_tokens} token di prompt ({s.cached_tokens} già in cache), {s.completion_tokens} generati, "
               f"{time.perf_counter() - t0:.1f}s]")
 
 

@@ -74,6 +74,7 @@ _SIGNATURES.update({
     "engine_n_logits": (_i32, [_vp]),
     "engine_n_past": (_i32, [_vp]),
     "engine_reset": (None, [_vp]),
+    "engine_truncate": (ctypes.c_int, [_vp, _i32]),
     "engine_last_error": (ctypes.c_char_p, [_vp]),
     # kernel (csrc/ops.h), esposti per i test di confronto con NumPy
     "op_simd": (ctypes.c_int, []),

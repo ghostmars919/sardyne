@@ -264,3 +264,43 @@ def test_real_tool_roundtrip(engine):
               "tool_calls": [{"type": "function", "function": c} for c in calls]},
              {"role": "tool", "content": "Sunny, 37 degrees"}]
     assert "37" in "".join(engine.stream(msgs, [tool], max_tokens=60, **NO_THINK))
+
+
+def test_prompt_cache_reuses_the_conversation(engine):
+    msgs = [{"role": "user", "content": "Name a color."}]
+    reply = "".join(engine.stream(msgs, max_tokens=12, **NO_THINK))
+    first = engine.prompt_ids(msgs, **NO_THINK)
+    msgs += [{"role": "assistant", "content": reply}, {"role": "user", "content": "Another one."}]
+    "".join(engine.stream(msgs, max_tokens=5, **NO_THINK))
+    # Il blocco <think> vuoto del primo prompt non è nella cronologia: il prefisso comune finisce lì.
+    second = engine.prompt_ids(msgs, **NO_THINK)
+    common = next(i for i, (a, b) in enumerate(zip(first, second)) if a != b)
+    assert engine.stats.cached_tokens == common > 5
+
+
+def test_prompt_cache_gives_the_same_reply_as_a_fresh_engine(engine):
+    msgs = [{"role": "user", "content": "List three fruits."}]
+    "".join(engine.stream(msgs, max_tokens=10, **NO_THINK))
+    cached = "".join(engine.stream(msgs, max_tokens=15, **NO_THINK))
+    assert engine.stats.cached_tokens == engine.stats.prompt_tokens - 1
+    fresh = ChatEngine(GGUF_06, max_seq=256)
+    assert cached == "".join(fresh.stream(msgs, max_tokens=15, **NO_THINK))
+    assert fresh.stats.cached_tokens == 0
+
+
+def test_prompt_cache_after_a_different_conversation(engine):
+    a = [{"role": "user", "content": "What is 2+2?"}]
+    b = [{"role": "user", "content": "What is the capital of Japan?"}]
+    "".join(engine.stream(a, max_tokens=6, **NO_THINK))
+    text = "".join(engine.stream(b, max_tokens=12, **NO_THINK))
+    assert 0 < engine.stats.cached_tokens < engine.stats.prompt_tokens  # solo l'inizio del template è comune
+    assert text == "".join(ChatEngine(GGUF_06, max_seq=256).stream(b, max_tokens=12, **NO_THINK))
+
+
+def test_prompt_cache_survives_an_interrupted_reply(engine):
+    msgs = [{"role": "user", "content": "Count from one to twenty."}]
+    g = engine.stream(msgs, max_tokens=30, **NO_THINK)
+    next(g), next(g)
+    g.close()
+    fresh = ChatEngine(GGUF_06, max_seq=256)
+    assert "".join(engine.stream(msgs, max_tokens=12, **NO_THINK)) == "".join(fresh.stream(msgs, max_tokens=12, **NO_THINK))

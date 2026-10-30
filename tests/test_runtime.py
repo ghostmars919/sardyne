@@ -238,6 +238,24 @@ def test_kv_cache_and_batching(synthetic):
     np.testing.assert_allclose(ctx.eval(TOKENS), full[-1], atol=1e-5, rtol=0)
 
 
+def test_truncate_and_batching(synthetic):
+    model = Model(synthetic)
+    full = Context(model, max_seq=32, n_batch=len(TOKENS), logits_all=True).eval(TOKENS)
+    ctx = Context(model, max_seq=32, n_batch=4)
+    ctx.eval(TOKENS[:7])
+    ctx.truncate(3)  # si riparte da metà, con token diversi da quelli di prima
+    assert ctx.n_past == 3
+    ctx.eval([60, 61])
+    ctx.truncate(3)
+    np.testing.assert_allclose(ctx.eval(TOKENS[3:]), full[-1], atol=1e-5, rtol=0)
+    ctx.truncate(ctx.n_past)  # nessun cambiamento
+    assert ctx.n_past == len(TOKENS)
+    for bad in (-1, len(TOKENS) + 1):
+        with pytest.raises(ValueError, match="posizione"):
+            ctx.truncate(bad)
+        assert ctx.n_past == len(TOKENS)
+
+
 def test_generate_matches_numpy(synthetic):
     ref = Llama.from_gguf(synthetic, max_seq=32, emulate_quant=True)
     ctx = Context(Model(synthetic), max_seq=32)

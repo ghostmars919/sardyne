@@ -873,3 +873,14 @@ void engine_reset(engine_ctx *c) {
     c->n_past = 0;
     c->n_logits = 0;
 }
+
+int engine_truncate(engine_ctx *c, int32_t n) {
+    if (!c) return -1;
+    if (n < 0 || n > c->n_past) {
+        snprintf(c->err, sizeof(c->err), "posizione %d fuori da [0, %d]", n, c->n_past);
+        return -1;
+    }
+    c->n_past = n; /* le posizioni successive verranno riscritte */
+    c->n_logits = 0;
+    return 0;
+}

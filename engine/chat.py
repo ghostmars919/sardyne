@@ -155,6 +155,7 @@ class ToolCallStream:
 @dataclass
 class ChatStats:
     prompt_tokens: int = 0
+    cached_tokens: int = 0  # parte del prompt già nella KV cache
     completion_tokens: int = 0
     finish_reason: str = "stop"  # stop o length
 
@@ -173,6 +174,21 @@ class ChatEngine:
         eos = self.tok.tokens[self.tok.eos_ids[0]] if self.tok.eos_ids else ""
         self.template = ChatTemplate(self.tok.chat_template, bos, eos)
         self.stats = ChatStats()
+        self._cached = []  # i token presenti nella KV cache, in ordine
+
+    def _eval_prompt(self, ids):
+        """Valuta solo la parte di prompt dopo il prefisso già in cache. L'ultimo token si valuta sempre,
+        perché servono i suoi logits."""
+        n = 0
+        limit = min(len(ids) - 1, len(self._cached))
+        while n < limit and ids[n] == self._cached[n]:
+            n += 1
+        self.ctx.truncate(n)
+        self._cached = ids[:n]  # valido anche se eval fallisce: la cache contiene almeno questo
+        logits = self.ctx.eval(ids[n:])
+        self._cached = list(ids)
+        self.stats.cached_tokens = n
+        return logits
 
     def prompt_ids(self, messages, tools=None, enable_thinking=None) -> list[int]:
         safe = [guard_message(m, self.tok) for m in messages]
@@ -191,8 +207,7 @@ class ChatEngine:
         sampler = sampler or Sampler()
         history = list(ids)
         decoder = Streamer(self.tok)
-        self.ctx.reset()
-        logits = self.ctx.eval(ids)
+        logits = self._eval_prompt(ids)
         for i in range(min(max_tokens, room)):
             tid = sampler(logits, history)
             if tid in self.tok.eos_ids:
@@ -205,6 +220,7 @@ class ChatEngine:
                 yield text
             if i + 1 < min(max_tokens, room):
                 logits = self.ctx.eval([tid])
+                self._cached.append(tid)
         rest = decoder.flush()
         if rest:
             yield rest

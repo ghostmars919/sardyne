@@ -67,6 +67,8 @@ const float *engine_logits(const engine_ctx *c);
 int32_t engine_n_logits(const engine_ctx *c);
 int32_t engine_n_past(const engine_ctx *c); /* token presenti nella KV cache */
 void engine_reset(engine_ctx *c);           /* svuota il contesto */
+/* Torna alla posizione n <= n_past: i primi n token restano nella KV cache. 0, oppure -1 se n non è valido. */
+int engine_truncate(engine_ctx *c, int32_t n);
 const char *engine_last_error(const engine_ctx *c);
 
 #endif
