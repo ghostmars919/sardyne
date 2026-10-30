@@ -107,10 +107,14 @@ class Context:
         return out if self.logits_all else out[-1]
 
 
-def generate(ctx: Context, prompt, n_new: int, eos_ids=(), on_token=None) -> list[int]:
-    """Greedy come Llama.generate: prefill del prompt, poi un token alla volta. Solo i token nuovi."""
+def generate(ctx: Context, prompt, n_new: int, eos_ids=(), on_token=None, sampler=None) -> list[int]:
+    """Prefill del prompt, poi un token alla volta. Solo i token nuovi.
+
+    sampler(logits, token già visti) sceglie il token; senza, è il greedy di Llama.generate.
+    """
     eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
-    out = []
+    pick = sampler or (lambda logits, history: int(np.argmax(logits)))
+    history, out = list(prompt), []
     if n_new <= 0:
         return out
     ctx.reset()
@@ -118,7 +122,8 @@ def generate(ctx: Context, prompt, n_new: int, eos_ids=(), on_token=None) -> lis
     if ctx.logits_all:
         logits = logits[-1]
     for _ in range(n_new):
-        nxt = int(np.argmax(logits))
+        nxt = pick(logits, history)
+        history.append(nxt)
         out.append(nxt)
         if on_token:
             on_token(nxt)
@@ -130,7 +135,25 @@ def generate(ctx: Context, prompt, n_new: int, eos_ids=(), on_token=None) -> lis
     return out
 
 
+def add_sampling_args(ap, temperature: float = 0.0):
+    ap.add_argument("--temperature", type=float, default=temperature, help="0 = greedy")
+    ap.add_argument("--top-k", type=int, default=0, help="0 = disattivato")
+    ap.add_argument("--top-p", type=float, default=1.0)
+    ap.add_argument("--min-p", type=float, default=0.0)
+    ap.add_argument("--repeat-penalty", type=float, default=1.0)
+    ap.add_argument("--repeat-last-n", type=int, default=64)
+    ap.add_argument("--seed", type=int, help="per ripetere la stessa sequenza")
+
+
+def sampling_params(args):
+    from engine.sampling import SamplingParams
+
+    return SamplingParams(args.temperature, args.top_k, args.top_p, args.min_p, args.repeat_penalty,
+                          args.repeat_last_n, args.seed)
+
+
 def main():
+    from engine.sampling import Sampler
     from engine.tokenizer.bpe import BPETokenizer, Streamer
 
     ap = argparse.ArgumentParser(description="Generazione greedy con il runtime C")
@@ -142,6 +165,7 @@ def main():
     ap.add_argument("--threads", type=int, default=0, help="thread di calcolo (0 = uno per core)")
     ap.add_argument("--no-simd", action="store_true", help="usa i kernel scalari")
     ap.add_argument("--compare", action="store_true", help="confronta i logits con la reference NumPy")
+    add_sampling_args(ap)
     args = ap.parse_args()
     if args.n < 0:
         ap.error("-n deve essere >= 0")
@@ -178,7 +202,7 @@ def main():
         streamer(tid)
 
     t0 = time.perf_counter()
-    generated = generate(ctx, ids, args.n, eos_ids=tok.eos_ids, on_token=on_token)
+    generated = generate(ctx, ids, args.n, eos_ids=tok.eos_ids, on_token=on_token, sampler=Sampler(sampling_params(args)))
     if not generated:
         print("\n\n[nessun token generato]")
         return
