@@ -11,6 +11,9 @@ Architetture supportate (config.json di HF): LlamaForCausalLM (Llama 2/3, SmolLM
 Qwen2ForCausalLM (Qwen2/2.5: uguale a Llama più un bias su q, k, v) e Qwen3ForCausalLM (senza
 bias, con una RMSNorm per testa su q e k prima della RoPE).
 
+Da GGUF anche "qwen3moe" (Qwen3-30B-A3B): come Qwen3, ma l'MLP è sostituito da una Mixture of
+Experts (vedi Llama.moe). Con i file grandi serve lazy=True, che tiene in RAM solo i vettori.
+
 Uso: python -m engine.ref.llama models/SmolLM2-135M "The capital of France is" -n 30
 """
 import argparse
@@ -24,7 +27,7 @@ import numpy as np
 
 from engine import quant
 from engine.loader import hf_config
-from engine.loader.gguf import GGUFFile
+from engine.loader.gguf import GGUFFile, LazyTensor
 from engine.loader.safetensors import SafeTensorsDir
 from engine.ref import ops
 
@@ -32,12 +35,13 @@ SUPPORTED = {"LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"}
 
 # Architetture GGUF supportate -> RoPE a coppie adiacenti? Come in llama.cpp: "llama" usa la
 # RoPE "normale" (pesi q/k permutati dal convertitore), "qwen2" la RoPE "neox" (pesi invariati).
-GGUF_ARCHS = {"llama": True, "qwen2": False, "qwen3": False}
+GGUF_ARCHS = {"llama": True, "qwen2": False, "qwen3": False, "qwen3moe": False}
 
 # Tensori che sappiamo usare. Un tensore diverso (es. rope_freqs.weight dei Llama 3.1) indica una
 # variante dell'architettura non supportata: meglio un errore che un modello sbagliato in silenzio.
 _GGUF_TENSOR = re.compile(r"(token_embd|output_norm|output)\.weight"
                           r"|blk\.\d+\.(attn_norm|attn_q_norm|attn_k_norm|attn_output|ffn_norm|ffn_gate|ffn_up|ffn_down)\.weight"
+                          r"|blk\.\d+\.(ffn_gate_inp|ffn_gate_exps|ffn_up_exps|ffn_down_exps)\.weight"
                           r"|blk\.\d+\.attn_[qkv]\.(weight|bias)")
 
 
@@ -58,12 +62,17 @@ class LlamaConfig:
     # False: RoPE sulle coppie (i, i+hd/2) come in HF ("neox"); True: coppie adiacenti (2i, 2i+1).
     rope_interleaved: bool = False
     qk_norm: bool = False  # Qwen3: RMSNorm per testa su q e k, prima della RoPE
+    n_expert: int = 0  # MoE: esperti per strato (0 = MLP normale)
+    n_expert_used: int = 0  # esperti scelti per ogni token
+    ffn_exp_dim: int = 0  # dimensione interna di un esperto
 
     def __post_init__(self):
         if self.n_head % self.n_kv_head:
             raise ValueError(f"n_head={self.n_head} non è multiplo di n_kv_head={self.n_kv_head}")
         if self.head_dim % 2:
             raise ValueError(f"head_dim={self.head_dim} dispari: la RoPE ruota coppie di dimensioni")
+        if self.n_expert and not 0 < self.n_expert_used <= self.n_expert:
+            raise ValueError(f"n_expert_used={self.n_expert_used} fuori da [1, {self.n_expert}]")
 
     @classmethod
     def from_hf(cls, cfg: dict) -> "LlamaConfig":
@@ -110,6 +119,11 @@ class LlamaConfig:
         vocab = m.get(f"{arch}.vocab_size")
         if vocab is None:
             vocab = gf.tensors["token_embd.weight"].shape[0]
+        ffn_dim = int(m[f"{arch}.feed_forward_length"])
+        n_expert = int(m.get(f"{arch}.expert_count", 0)) if arch == "qwen3moe" else 0
+        n_used = int(m.get(f"{arch}.expert_used_count", 0)) if n_expert else 0
+        if arch == "qwen3moe" and not n_expert:
+            raise ValueError("qwen3moe senza expert_count")
         return cls(
             vocab_size=int(vocab),
             dim=dim,
@@ -117,7 +131,7 @@ class LlamaConfig:
             n_head=n_head,
             n_kv_head=int(m.get(f"{arch}.attention.head_count_kv", n_head)),
             head_dim=head_dim,
-            ffn_dim=int(m[f"{arch}.feed_forward_length"]),
+            ffn_dim=ffn_dim,
             norm_eps=float(m[f"{arch}.attention.layer_norm_rms_epsilon"]),
             rope_theta=float(m.get(f"{arch}.rope.freq_base", 10000.0)),
             tie_embeddings="output.weight" not in gf.tensors,
@@ -125,15 +139,24 @@ class LlamaConfig:
             max_pos=int(m.get(f"{arch}.context_length", 2048)),
             rope_interleaved=GGUF_ARCHS[arch],
             qk_norm="blk.0.attn_q_norm.weight" in gf.tensors,
+            n_expert=n_expert,
+            n_expert_used=n_used,
+            # Come llama.cpp, se il metadato manca: ffn_dim è la somma degli esperti scelti.
+            ffn_exp_dim=int(m.get(f"{arch}.expert_feed_forward_length", 0)) or (ffn_dim // n_used if n_used else 0),
         )
 
     def expected_shapes(self) -> dict:
         """Shape attese dei pesi, per chiave del dizionario dei parametri."""
         q, kv = self.n_head * self.head_dim, self.n_kv_head * self.head_dim
         layer = {"attn_norm": (self.dim,), "mlp_norm": (self.dim,),
-                 "wq": (q, self.dim), "wk": (kv, self.dim), "wv": (kv, self.dim), "wo": (self.dim, q),
-                 "w_gate": (self.ffn_dim, self.dim), "w_up": (self.ffn_dim, self.dim),
-                 "w_down": (self.dim, self.ffn_dim)}
+                 "wq": (q, self.dim), "wk": (kv, self.dim), "wv": (kv, self.dim), "wo": (self.dim, q)}
+        if self.n_expert:
+            ne, fe = self.n_expert, self.ffn_exp_dim
+            layer.update(gate_inp=(ne, self.dim), exp_gate=(ne, fe, self.dim), exp_up=(ne, fe, self.dim),
+                         exp_down=(ne, self.dim, fe))
+        else:
+            layer.update(w_gate=(self.ffn_dim, self.dim), w_up=(self.ffn_dim, self.dim),
+                         w_down=(self.dim, self.ffn_dim))
         if self.qkv_bias:
             layer.update(bq=(q,), bk=(kv,), bv=(kv,))
         if self.qk_norm:
@@ -154,27 +177,33 @@ def check_shapes(cfg: LlamaConfig, p: dict):
                 raise ValueError(f"strato {i}, {key}: shape {layer[key].shape}, attesa {shape}")
 
 
-def load_weights_gguf(cfg: LlamaConfig, gf: GGUFFile) -> dict:
-    """Nomi dei tensori GGUF -> stesso dizionario di load_weights. Tutto convertito in fp32."""
+def load_weights_gguf(cfg: LlamaConfig, gf: GGUFFile, lazy: bool = False) -> dict:
+    """Nomi dei tensori GGUF -> stesso dizionario di load_weights. Tutto convertito in fp32.
+
+    Con lazy=True le matrici restano nel file (LazyTensor): in RAM vanno solo i vettori."""
+    mat = (lambda name: LazyTensor(gf, name)) if lazy else gf.get_f32
     p = {
-        "embed": gf.get_f32("token_embd.weight"),
+        "embed": mat("token_embd.weight"),
         "norm": gf.get_f32("output_norm.weight"),
         "layers": [],
     }
-    p["lm_head"] = p["embed"] if cfg.tie_embeddings else gf.get_f32("output.weight")
+    p["lm_head"] = p["embed"] if cfg.tie_embeddings else mat("output.weight")
     for i in range(cfg.n_layer):
         pre = f"blk.{i}."
         layer = {
             "attn_norm": gf.get_f32(pre + "attn_norm.weight"),
-            "wq": gf.get_f32(pre + "attn_q.weight"),
-            "wk": gf.get_f32(pre + "attn_k.weight"),
-            "wv": gf.get_f32(pre + "attn_v.weight"),
-            "wo": gf.get_f32(pre + "attn_output.weight"),
+            "wq": mat(pre + "attn_q.weight"),
+            "wk": mat(pre + "attn_k.weight"),
+            "wv": mat(pre + "attn_v.weight"),
+            "wo": mat(pre + "attn_output.weight"),
             "mlp_norm": gf.get_f32(pre + "ffn_norm.weight"),
-            "w_gate": gf.get_f32(pre + "ffn_gate.weight"),
-            "w_up": gf.get_f32(pre + "ffn_up.weight"),
-            "w_down": gf.get_f32(pre + "ffn_down.weight"),
         }
+        if cfg.n_expert:
+            layer.update(gate_inp=mat(pre + "ffn_gate_inp.weight"), exp_gate=mat(pre + "ffn_gate_exps.weight"),
+                         exp_up=mat(pre + "ffn_up_exps.weight"), exp_down=mat(pre + "ffn_down_exps.weight"))
+        else:
+            layer.update(w_gate=mat(pre + "ffn_gate.weight"), w_up=mat(pre + "ffn_up.weight"),
+                         w_down=mat(pre + "ffn_down.weight"))
         if cfg.qkv_bias:
             for n in ("q", "k", "v"):
                 layer["b" + n] = gf.get_f32(pre + f"attn_{n}.bias")
@@ -238,7 +267,9 @@ class KVCache:
 
 # Chiavi del dizionario dei parametri -> nomi dei tensori GGUF di ogni strato.
 _GGUF_MATRICES = {"wq": "attn_q", "wk": "attn_k", "wv": "attn_v", "wo": "attn_output",
-                  "w_gate": "ffn_gate", "w_up": "ffn_up", "w_down": "ffn_down"}
+                  "w_gate": "ffn_gate", "w_up": "ffn_up", "w_down": "ffn_down",
+                  "gate_inp": "ffn_gate_inp", "exp_gate": "ffn_gate_exps", "exp_up": "ffn_up_exps",
+                  "exp_down": "ffn_down_exps"}
 
 
 class Llama:
@@ -252,11 +283,12 @@ class Llama:
         self.cos, self.sin = ops.rope_cos_sin(self.max_seq, cfg.head_dim, cfg.rope_theta)
         self._act_quant = act_quant or {}
 
-    def linear(self, x, w, b=None):
-        kind = self._act_quant.get(id(w))
+    def linear(self, x, w, b=None, source=None):
+        """source: il tensore da cui viene w, se w ne è una fetta (un esperto)."""
+        kind = self._act_quant.get(id(w if source is None else source))
         if kind:
             x = quant.fake_quant(x, kind)  # stesso errore delle attivazioni int8 del runtime C
-        return ops.linear(x, w, b)
+        return ops.linear(x, np.asarray(w), b)
 
     @classmethod
     def from_dir(cls, path, max_seq: int = 2048) -> "Llama":
@@ -265,30 +297,36 @@ class Llama:
         return cls(cfg, load_weights(cfg, SafeTensorsDir(path)), max_seq)
 
     @classmethod
-    def from_gguf(cls, path, max_seq: int = 2048, emulate_quant: bool = False) -> "Llama":
+    def from_gguf(cls, path, max_seq: int = 2048, emulate_quant: bool = False, lazy: bool = False) -> "Llama":
         """Pesi quantizzati -> dequantizzati in fp32. Con emulate_quant=True anche le attivazioni
         vengono quantizzate come nel runtime C: è il riferimento per confrontarlo con tolleranze
-        strette (l'errore delle attivazioni int8 si amplifica con la profondità del modello)."""
-        with GGUFFile(path) as gf:
-            cfg = LlamaConfig.from_gguf(gf)
-            params = load_weights_gguf(cfg, gf)
-            act = {}
-            if emulate_quant:
-                def tag(arr, name):
-                    kind = quant.VEC_DOT_TYPE.get(gf.tensors[name].type_name)
-                    if kind:
-                        act[id(arr)] = kind
-                tag(params["lm_head"], "token_embd.weight" if cfg.tie_embeddings else "output.weight")
-                for i, layer in enumerate(params["layers"]):
-                    for key, gname in _GGUF_MATRICES.items():
+        strette (l'errore delle attivazioni int8 si amplifica con la profondità del modello).
+
+        Con lazy=True ogni matrice viene decodificata quando serve e poi scartata (più lento, ma
+        la RAM resta piccola): il file rimane aperto finché vive il modello."""
+        gf = GGUFFile(path)
+        cfg = LlamaConfig.from_gguf(gf)
+        params = load_weights_gguf(cfg, gf, lazy)
+        act = {}
+        if emulate_quant:
+            def tag(arr, name):
+                kind = quant.VEC_DOT_TYPE.get(gf.tensors[name].type_name)
+                if kind:
+                    act[id(arr)] = kind
+            tag(params["lm_head"], "token_embd.weight" if cfg.tie_embeddings else "output.weight")
+            for i, layer in enumerate(params["layers"]):
+                for key, gname in _GGUF_MATRICES.items():
+                    if key in layer:
                         tag(layer[key], f"blk.{i}.{gname}.weight")
+        if not lazy:
+            gf.close()
         return cls(cfg, params, max_seq, act)
 
     @classmethod
-    def load(cls, path, max_seq: int = 2048) -> "Llama":
+    def load(cls, path, max_seq: int = 2048, lazy: bool = False) -> "Llama":
         """Un file .gguf oppure una cartella HF con safetensors."""
         if str(path).endswith(".gguf"):
-            return cls.from_gguf(path, max_seq)
+            return cls.from_gguf(path, max_seq, lazy=lazy)
         return cls.from_dir(path, max_seq)
 
     def new_cache(self) -> KVCache:
@@ -323,6 +361,28 @@ class Llama:
         out = ops.scaled_dot_product_attention(qg, k[:, None], v[:, None], mask)
         return self.linear(ops.merge_heads(out.reshape(c.n_head, t, hd)), layer["wo"])
 
+    def moe(self, h, layer):
+        """Mixture of Experts [T, dim] -> [T, dim]: al posto dell'unico MLP, n_expert MLP SwiGLU piccoli.
+
+        Il router dà a ogni token una probabilità per esperto; si tengono i k più probabili, con le
+        probabilità rinormalizzate a somma 1: uscita = Σ wᵢ · down_i(silu(gate_i·h) · up_i·h).
+        Si usano solo k esperti su n_expert: i pesi attivi sono una piccola parte del modello.
+        I token vengono raggruppati per esperto, in ordine crescente di esperto.
+        """
+        probs = ops.softmax(self.linear(h, layer["gate_inp"]))  # [T, n_expert]
+        top = np.argsort(-probs, axis=-1, kind="stable")[:, :self.cfg.n_expert_used]  # [T, k]
+        chosen = np.take_along_axis(probs, top, axis=-1)
+        weights = chosen / chosen.sum(axis=-1, keepdims=True)
+
+        gate, up, down = layer["exp_gate"], layer["exp_up"], layer["exp_down"]
+        out = np.zeros_like(h)
+        for e in np.unique(top).tolist():
+            rows, slots = np.nonzero(top == e)  # un token sceglie un esperto al massimo una volta
+            he = h[rows]
+            y = ops.silu(self.linear(he, gate[e], source=gate)) * self.linear(he, up[e], source=up)
+            out[rows] += weights[rows, slots, None] * self.linear(y, down[e], source=down)
+        return out
+
     def forward(self, tokens, cache: KVCache | None = None) -> np.ndarray:
         """Logits [T, vocab] per i token dati. Con una cache, i token proseguono quelli già visti."""
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
@@ -343,9 +403,12 @@ class Llama:
         for li, layer in enumerate(self.p["layers"]):
             x = x + self.attention(ops.rms_norm(x, layer["attn_norm"], c.norm_eps), layer, li, pos0, cache, mask)
             h = ops.rms_norm(x, layer["mlp_norm"], c.norm_eps)
-            # SwiGLU (come ops.swiglu_mlp, ma con self.linear per l'eventuale emulazione)
-            x = x + self.linear(ops.silu(self.linear(h, layer["w_gate"])) * self.linear(h, layer["w_up"]),
-                                layer["w_down"])
+            if c.n_expert:
+                x = x + self.moe(h, layer)
+            else:
+                # SwiGLU (come ops.swiglu_mlp, ma con self.linear per l'eventuale emulazione)
+                x = x + self.linear(ops.silu(self.linear(h, layer["w_gate"])) * self.linear(h, layer["w_up"]),
+                                    layer["w_down"])
         x = ops.rms_norm(x, self.p["norm"], c.norm_eps)
 
         if cache is not None:
@@ -408,8 +471,11 @@ def main():
     ap.add_argument("prompt")
     ap.add_argument("-n", type=int, default=40, help="token da generare")
     ap.add_argument("--tokenizer", help="cartella HF con tokenizer.json (necessaria con i .gguf fino alla Fase 7)")
+    ap.add_argument("--lazy", action="store_true", help="solo .gguf: decodifica le matrici quando servono (file grandi)")
     args = ap.parse_args()
 
+    if args.lazy and not args.model.endswith(".gguf"):
+        ap.error("--lazy vale solo per i file .gguf")
     tok_dir = args.tokenizer or args.model
     if not (Path(tok_dir) / "tokenizer.json").exists():
         ap.error("serve un tokenizer: con un .gguf passa --tokenizer models/<cartella HF>")
@@ -417,7 +483,7 @@ def main():
         ap.error("-n deve essere >= 0")
 
     t0 = time.perf_counter()
-    model = Llama.load(args.model, max_seq=1024)
+    model = Llama.load(args.model, max_seq=1024, lazy=args.lazy)
     tok = Tokenizer.from_dir(tok_dir)
     if args.model.endswith(".gguf"):
         with GGUFFile(args.model) as gf:

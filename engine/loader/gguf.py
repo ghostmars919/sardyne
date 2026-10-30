@@ -259,9 +259,18 @@ class GGUFFile:
         rows = t.n_elements // t.ne[0]
         return buf.reshape(rows, t.nbytes // rows)
 
-    def get_f32(self, name) -> np.ndarray:
+    def get_f32(self, name, idx=None) -> np.ndarray:
+        """Tensore in fp32. idx (intero o array di interi): solo quelle fette della prima dimensione,
+        decodificando soltanto i loro byte."""
         t = self.tensors[name]
-        a = self.raw(name)
+        a, shape = self.raw(name), t.shape
+        if idx is not None:
+            if t.type_name in quant.DEQUANT:  # raw ha righe di pesi: ogni fetta ne occupa `sub`
+                sub = math.prod(shape[1:-1])
+                a = a[(np.atleast_1d(idx)[:, None] * sub + np.arange(sub)).ravel()]
+            else:
+                a = a[idx]
+            shape = shape[1:] if np.ndim(idx) == 0 else (len(idx), *shape[1:])
         if t.type_name == "F32":
             return np.array(a)
         if t.type_name == "F16":
@@ -269,8 +278,31 @@ class GGUFFile:
         if t.type_name == "BF16":
             return bf16_to_f32(a)
         if t.type_name in quant.DEQUANT:
-            return quant.dequantize(a, t.type_name, t.shape)
+            return quant.dequantize(a, t.type_name, shape)
         raise NotImplementedError(f"{name}: tipo {t.type_name} non supportato")
+
+
+class LazyTensor:
+    """Tensore del file decodificato in fp32 solo quando serve, e subito scartato.
+
+    Si usa come un array: w[e] decodifica una fetta della prima dimensione (un esperto, gli embedding
+    di alcuni token), np.asarray(w) tutto il tensore. In fp32 Qwen3-30B-A3B occuperebbe 120 GB.
+    """
+
+    def __init__(self, gf: GGUFFile, name: str):
+        self.gf, self.name = gf, name
+        self.shape = gf.tensors[name].shape
+
+    @property
+    def size(self) -> int:
+        return math.prod(self.shape)
+
+    def __getitem__(self, idx) -> np.ndarray:
+        return self.gf.get_f32(self.name, idx)
+
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
+        a = self.gf.get_f32(self.name)
+        return a if dtype is None else a.astype(dtype)
 
 
 def _fmt_value(v, limit=6) -> str:
