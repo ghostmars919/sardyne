@@ -1,18 +1,20 @@
-"""Mixture of Experts (architettura GGUF "qwen3moe") nella reference NumPy, e caricamento lazy."""
+"""Mixture of Experts (architettura GGUF "qwen3moe"): reference NumPy, caricamento lazy e runtime C."""
 import numpy as np
 import pytest
 
-from engine import quant
+from engine import capi, quant
 from engine.loader.gguf import GGUFFile, LazyTensor
 from engine.loader.gguf_writer import GGUFWriter, f32_to_bf16
 from engine.ref import ops
 from engine.ref.llama import Llama
+from engine.runtime import Context, Model, generate, set_simd
 
 DIM, N_HEAD, N_KV, HEAD_DIM, FFN_EXP, VOCAB, N_LAYER = 32, 4, 2, 16, 64, 50, 2
 TOKENS = [3, 14, 15, 9, 26, 5, 35, 8, 2, 7, 1, 40]
+needs_c = pytest.mark.skipif(not capi.available(), reason="libengine non compilata: eseguire make")
 
 
-def weights(n_expert, seed=0, same_experts=False):
+def weights(n_expert, seed=0, same_experts=False, dim=DIM, head_dim=HEAD_DIM, ffn_exp=FFN_EXP):
     """Pesi casuali: dizionario nome GGUF -> array fp32 (esperti in 3D, come nel file)."""
     rng = np.random.default_rng(seed)
 
@@ -22,41 +24,46 @@ def weights(n_expert, seed=0, same_experts=False):
     def stack(*shape):
         return np.broadcast_to(w(*shape), (n_expert, *shape)).copy() if same_experts else w(n_expert, *shape)
 
-    q, kv = N_HEAD * HEAD_DIM, N_KV * HEAD_DIM
-    t = {"token_embd.weight": w(VOCAB, DIM), "output_norm.weight": 1 + w(DIM), "output.weight": w(VOCAB, DIM)}
+    q, kv = N_HEAD * head_dim, N_KV * head_dim
+    t = {"token_embd.weight": w(VOCAB, dim), "output_norm.weight": 1 + w(dim), "output.weight": w(VOCAB, dim)}
     for i in range(N_LAYER):
         p = f"blk.{i}."
-        t.update({p + "attn_norm.weight": 1 + w(DIM), p + "ffn_norm.weight": 1 + w(DIM),
-                  p + "attn_q.weight": w(q, DIM), p + "attn_k.weight": w(kv, DIM), p + "attn_v.weight": w(kv, DIM),
-                  p + "attn_output.weight": w(DIM, q), p + "attn_q_norm.weight": 1 + w(HEAD_DIM),
-                  p + "attn_k_norm.weight": 1 + w(HEAD_DIM), p + "ffn_gate_inp.weight": 3 * w(n_expert, DIM),
-                  p + "ffn_gate_exps.weight": stack(FFN_EXP, DIM), p + "ffn_up_exps.weight": stack(FFN_EXP, DIM),
-                  p + "ffn_down_exps.weight": stack(DIM, FFN_EXP)})
+        t.update({p + "attn_norm.weight": 1 + w(dim), p + "ffn_norm.weight": 1 + w(dim),
+                  p + "attn_q.weight": w(q, dim), p + "attn_k.weight": w(kv, dim), p + "attn_v.weight": w(kv, dim),
+                  p + "attn_output.weight": w(dim, q), p + "attn_q_norm.weight": 1 + w(head_dim),
+                  p + "attn_k_norm.weight": 1 + w(head_dim), p + "ffn_gate_inp.weight": 3 * w(n_expert, dim),
+                  p + "ffn_gate_exps.weight": stack(ffn_exp, dim), p + "ffn_up_exps.weight": stack(ffn_exp, dim),
+                  p + "ffn_down_exps.weight": stack(dim, ffn_exp)})
     return t
 
 
-def write_gguf(path, tensors, arch="qwen3moe", n_expert=8, n_used=3, outtype="f32"):
+def write_gguf(path, tensors, arch="qwen3moe", n_expert=8, n_used=3, outtype="f32", dim=DIM, head_dim=HEAD_DIM,
+               ffn_exp=FFN_EXP, random_kinds=None):
+    """random_kinds: nome -> tipo quantizzato con blocchi casuali (non abbiamo quantizzatori K-quant)."""
     w = GGUFWriter(path)
     w.add("general.architecture", arch)
     w.add(f"{arch}.vocab_size", VOCAB)
     w.add(f"{arch}.context_length", 64)
-    w.add(f"{arch}.embedding_length", DIM)
+    w.add(f"{arch}.embedding_length", dim)
     w.add(f"{arch}.block_count", N_LAYER)
-    w.add(f"{arch}.feed_forward_length", FFN_EXP * n_used if arch == "qwen3moe" else FFN_EXP)
+    w.add(f"{arch}.feed_forward_length", ffn_exp * max(n_used, 1) if arch == "qwen3moe" else ffn_exp)
     w.add(f"{arch}.attention.head_count", N_HEAD)
     w.add(f"{arch}.attention.head_count_kv", N_KV)
-    w.add(f"{arch}.attention.key_length", HEAD_DIM)
-    w.add(f"{arch}.attention.value_length", HEAD_DIM)
+    w.add(f"{arch}.attention.key_length", head_dim)
+    w.add(f"{arch}.attention.value_length", head_dim)
     w.add(f"{arch}.rope.freq_base", 10000.0)
     w.add(f"{arch}.attention.layer_norm_rms_epsilon", 1e-6)
     if arch == "qwen3moe":
         if n_expert:
             w.add(f"{arch}.expert_count", n_expert)
         w.add(f"{arch}.expert_used_count", n_used)
-        w.add(f"{arch}.expert_feed_forward_length", FFN_EXP)
-    for name, data in tensors.items():
+        w.add(f"{arch}.expert_feed_forward_length", ffn_exp)
+    for i, (name, data) in enumerate(tensors.items()):
         ne = tuple(reversed(data.shape))
-        if data.ndim == 1 or outtype == "f32":
+        kind = random_kinds(name) if random_kinds else None
+        if kind:
+            w.add_raw_tensor(name, ne, kind, random_blocks(kind, data.size // quant.QK[kind], seed=i).tobytes())
+        elif data.ndim == 1 or outtype == "f32":
             w.add_tensor(name, data, "F32")
         elif outtype == "bf16":
             w.add_tensor(name, f32_to_bf16(data), "BF16")
@@ -65,6 +72,11 @@ def write_gguf(path, tensors, arch="qwen3moe", n_expert=8, n_used=3, outtype="f3
             w.add_raw_tensor(name, ne, kind, quant.quantize(data.reshape(-1, data.shape[-1]), kind))
     w.write()
     return path
+
+
+def random_blocks(kind, n_blocks, seed):
+    from test_quant import random_blocks as blocks
+    return blocks(kind, n_blocks, seed)
 
 
 def naive_moe(h, layer, k):
@@ -244,3 +256,169 @@ def test_wrong_expert_shape_is_rejected(tmp_path, tensors):
     bad["blk.1.ffn_up_exps.weight"] = tensors["blk.1.ffn_up_exps.weight"][:-1]
     with pytest.raises(ValueError, match="exp_up"):
         Llama.from_gguf(write_gguf(tmp_path / "m.gguf", bad), max_seq=32)
+
+
+# ---------------------------------------------------------------- runtime C
+
+def real_file_kinds(name):
+    """I tipi di un Q4_K_M reale: K-quant dove le righe sono multiple di 256, Q5_0 in ffn_down."""
+    if "gate_inp" in name or name.endswith("norm.weight") or "token_embd" in name or name == "output.weight":
+        return None
+    if "ffn_down" in name:
+        return "Q5_0"
+    return "Q6_K" if "ffn_up" in name or "attn_output" in name else "Q4_K"
+
+
+@pytest.fixture(scope="module", params=[("f32", 8, 3), ("bf16", 8, 3), ("q8_0", 8, 3), ("q4_0", 8, 3), ("q8_0", 5, 5),
+                                        ("f32", 1, 1), ("q8_0", 128, 8), ("kquant", 8, 3)],
+                ids=lambda p: "-".join(map(str, p)))
+def c_model(request, tmp_path_factory):
+    outtype, n_expert, n_used = request.param
+    path = tmp_path_factory.mktemp("c") / "m.gguf"
+    if outtype == "kquant":
+        sizes = dict(dim=256, head_dim=64, ffn_exp=160)
+        write_gguf(path, weights(n_expert, **sizes), n_expert=n_expert, n_used=n_used, random_kinds=real_file_kinds, **sizes)
+    else:
+        write_gguf(path, weights(n_expert), n_expert=n_expert, n_used=n_used, outtype=outtype)
+    return path
+
+
+@pytest.fixture(params=[False, True], ids=["scalare", "avx2"])
+def kernels(request):
+    if request.param and not set_simd(True):
+        pytest.skip("CPU senza AVX2")
+    set_simd(request.param)
+    yield request.param
+    set_simd(True)
+
+
+def assert_close(c, ref):
+    # I K-quant casuali danno logits grandi: la tolleranza segue la scala.
+    np.testing.assert_allclose(c, ref, atol=1e-4 * max(1.0, float(np.abs(ref).max())), rtol=0)
+
+
+@needs_c
+def test_c_matches_numpy(c_model, kernels):
+    ref = Llama.from_gguf(c_model, max_seq=32, emulate_quant=True).forward(TOKENS)
+    ctx = Context(Model(c_model), max_seq=32, n_batch=len(TOKENS), logits_all=True)
+    assert_close(ctx.eval(TOKENS), ref)
+
+
+@needs_c
+def test_c_info_matches_numpy_config(c_model):
+    cfg = Llama.from_gguf(c_model, max_seq=8).cfg
+    i = Model(c_model).info
+    assert (i.n_expert, i.n_expert_used, i.ffn_exp_dim, bool(i.qk_norm)) == \
+           (cfg.n_expert, cfg.n_expert_used, cfg.ffn_exp_dim, cfg.qk_norm)
+
+
+@needs_c
+def test_c_generate_matches_numpy(c_model):
+    ref = Llama.from_gguf(c_model, max_seq=32, emulate_quant=True)
+    assert generate(Context(Model(c_model), max_seq=32), TOKENS[:4], 12) == ref.generate(TOKENS[:4], 12)
+
+
+@needs_c
+def test_thread_count_does_not_change_results(c_model):
+    model = Model(c_model)
+    outs = []
+    for n_threads in (1, 2, 3, 4, 7):
+        ctx = Context(model, max_seq=32, n_batch=len(TOKENS), logits_all=True, n_threads=n_threads)
+        logits = ctx.eval(TOKENS[:8])
+        outs.append(np.concatenate([logits, ctx.eval(TOKENS[8:])]))  # prefill + seguito
+    for o in outs[1:]:
+        assert np.array_equal(o, outs[0])  # bit per bit
+
+
+@needs_c
+def test_many_threads_stress(c_model):
+    model = Model(c_model)
+    ref, ctx = Context(model, max_seq=32, n_threads=1), Context(model, max_seq=32, n_threads=8)
+    for _ in range(10):
+        ref.reset()
+        ctx.reset()
+        a, b = ref.eval(TOKENS[:6]), ctx.eval(TOKENS[:6])
+        for t in TOKENS[6:]:
+            a, b = ref.eval([t]), ctx.eval([t])
+        assert np.array_equal(a, b)
+
+
+@needs_c
+def test_batching_and_cache(c_model):
+    model = Model(c_model)
+    full = Context(model, max_seq=32, n_batch=len(TOKENS), logits_all=True).eval(TOKENS)
+    chunked = Context(model, max_seq=32, n_batch=5, logits_all=True).eval(TOKENS)
+    assert_close(chunked, full)
+    ctx = Context(model, max_seq=32, n_batch=4)
+    last = ctx.eval(TOKENS[:7])
+    assert_close(last, full[6])
+    for i, t in enumerate(TOKENS[7:], start=7):
+        assert_close(ctx.eval([t]), full[i])
+
+
+@needs_c
+def test_c_uses_only_chosen_experts(tmp_path, tensors):
+    """Stessa prova della reference: i pesi degli esperti non scelti diventano NaN."""
+    ref = Llama.from_gguf(write_gguf(tmp_path / "a.gguf", tensors), max_seq=32)
+    used = [set() for _ in range(N_LAYER)]
+    real_moe = ref.moe
+
+    def spy(h, layer):
+        top = np.argsort(-ops.softmax(h @ layer["gate_inp"].T), axis=-1, kind="stable")[:, :3]
+        used[next(i for i, l in enumerate(ref.p["layers"]) if l is layer)].update(top.ravel().tolist())
+        return real_moe(h, layer)
+
+    ref.moe = spy
+    ref.forward(TOKENS)
+    poisoned = dict(tensors)
+    for i, chosen in enumerate(used):
+        unused = sorted(set(range(8)) - chosen)
+        assert unused
+        for gname in ("gate", "up", "down"):
+            name = f"blk.{i}.ffn_{gname}_exps.weight"
+            poisoned[name] = tensors[name].copy()
+            poisoned[name][unused] = np.nan
+    clean = Context(Model(tmp_path / "a.gguf"), max_seq=32, n_batch=len(TOKENS), logits_all=True).eval(TOKENS)
+    dirty = Context(Model(write_gguf(tmp_path / "b.gguf", poisoned)), max_seq=32, n_batch=len(TOKENS),
+                    logits_all=True).eval(TOKENS)
+    assert np.array_equal(clean, dirty)
+
+
+@needs_c
+def test_ties_choose_the_lowest_experts(tmp_path, tensors):
+    """Router a zero: probabilità tutte uguali, si scelgono i primi k esperti, come nella reference."""
+    t = dict(tensors)
+    for i in range(N_LAYER):
+        t[f"blk.{i}.ffn_gate_inp.weight"] = np.zeros_like(tensors[f"blk.{i}.ffn_gate_inp.weight"])
+    path = write_gguf(tmp_path / "m.gguf", t)
+    ref = Llama.from_gguf(path, max_seq=32).forward(TOKENS)
+    assert_close(Context(Model(path), max_seq=32, n_batch=len(TOKENS), logits_all=True).eval(TOKENS), ref)
+
+
+@needs_c
+@pytest.mark.parametrize("n_expert,n_used,msg", [(0, 3, "expert_count"), (8, 0, "expert_used_count"),
+                                                 (8, 9, "expert_used_count")])
+def test_c_rejects_bad_expert_counts(tmp_path, tensors, n_expert, n_used, msg):
+    path = write_gguf(tmp_path / "m.gguf", tensors, n_expert=n_expert, n_used=n_used)
+    with pytest.raises(ValueError, match=msg):
+        Model(path)
+
+
+@needs_c
+@pytest.mark.parametrize("name,cut", [("blk.1.ffn_up_exps.weight", lambda a: a[:-1]),
+                                      ("blk.0.ffn_down_exps.weight", lambda a: a[0]),
+                                      ("blk.0.ffn_gate_inp.weight", lambda a: a[:-1])],
+                         ids=["meno-esperti", "2d", "router"])
+def test_c_rejects_wrong_shapes(tmp_path, tensors, name, cut):
+    bad = dict(tensors)
+    bad[name] = cut(tensors[name])
+    with pytest.raises(ValueError, match=name.replace(".", r"\.")):
+        Model(write_gguf(tmp_path / "m.gguf", bad))
+
+
+@needs_c
+def test_c_rejects_unknown_expert_tensor(tmp_path, tensors):
+    bad = dict(tensors)
+    bad["blk.0.ffn_gate_shexp.weight"] = np.ones((FFN_EXP, DIM), np.float32)
+    with pytest.raises(ValueError, match="ffn_gate_shexp"):
+        Model(write_gguf(tmp_path / "m.gguf", bad))

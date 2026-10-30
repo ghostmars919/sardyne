@@ -32,7 +32,7 @@ def set_simd(enable: bool) -> bool:
 
 
 class Model:
-    """Pesi letti con mmap da un GGUF (architetture llama e qwen2; pesi F32/F16/BF16 o quantizzati
+    """Pesi letti con mmap da un GGUF (architetture llama, qwen2, qwen3 e qwen3moe; pesi F32/F16/BF16 o quantizzati
     Q8_0/Q4_0/Q5_0/Q4_K/Q6_K, quindi anche i file Q8_0 e Q4_K_M)."""
 
     def __init__(self, path):
@@ -136,7 +136,7 @@ def main():
     from engine.tokenizer.hf import Tokenizer
 
     ap = argparse.ArgumentParser(description="Generazione greedy con il runtime C")
-    ap.add_argument("model", help="file .gguf (llama o qwen2; F32/F16/BF16, Q8_0, Q4_K_M...)")
+    ap.add_argument("model", help="file .gguf (llama, qwen2, qwen3, qwen3moe; F32/F16/BF16, Q8_0, Q4_K_M...)")
     ap.add_argument("prompt")
     ap.add_argument("--tokenizer", required=True, help="cartella HF con tokenizer.json (fino alla Fase 7)")
     ap.add_argument("-n", type=int, default=40, help="token da generare")
@@ -169,7 +169,7 @@ def main():
     if args.compare:
         from engine.ref.llama import Llama
 
-        ref = Llama.from_gguf(args.model, max_seq=len(ids), emulate_quant=True)
+        ref = Llama.from_gguf(args.model, max_seq=len(ids), emulate_quant=True, lazy=bool(model.info.n_expert))
         c_all = Context(model, max_seq=len(ids), n_batch=len(ids), logits_all=True)
         d = np.abs(c_all.eval(ids) - ref.forward(ids))
         print(f"[confronto con NumPy sul prompt: max |diff| {d.max():.2e}, media {d.mean():.2e} "

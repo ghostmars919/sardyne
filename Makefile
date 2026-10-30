@@ -59,14 +59,14 @@ test-asan: debug
 	LD_PRELOAD="$$($(CC) -print-file-name=libasan.so) $$($(CC) -print-file-name=libubsan.so)" \
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 	LLM_ENGINE_LIB=build/debug/libengine.so \
-	$(PYTHON) -m pytest -q -p no:cacheprovider tests/test_gguf.py tests/test_capi.py tests/test_runtime.py tests/test_quant.py -k "not real_model and not real_quantized"
+	$(PYTHON) -m pytest -q -p no:cacheprovider tests/test_gguf.py tests/test_capi.py tests/test_runtime.py tests/test_quant.py tests/test_moe.py -k "not real_model and not real_quantized"
 
 test-tsan:
 	$(MAKE) BUILD=build/tsan ARCHFLAGS= CFLAGS="-std=c11 -O1 -g -Wall -Wextra -fPIC -fsanitize=thread" \
 		LDFLAGS="-lm -lpthread -fsanitize=thread" build/tsan/libengine.so
 	LD_PRELOAD="$$($(CC) -print-file-name=libtsan.so)" TSAN_OPTIONS="halt_on_error=1 report_signal_unsafe=0" \
 	LLM_ENGINE_LIB=build/tsan/libengine.so \
-	$(PYTHON) -m pytest -q -p no:cacheprovider tests/test_runtime.py -k "thread or batching"
+	$(PYTHON) -m pytest -q -p no:cacheprovider tests/test_runtime.py tests/test_moe.py -k "thread or batching"
 
 clean:
 	rm -rf build

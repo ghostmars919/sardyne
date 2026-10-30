@@ -1,4 +1,4 @@
-/* Runtime fp32 per modelli Llama-like (architetture GGUF "llama", "qwen2" e "qwen3").
+/* Runtime fp32 per modelli Llama-like (architetture GGUF "llama", "qwen2", "qwen3" e "qwen3moe").
  *
  * È la traduzione in C di engine/ref/llama.py: stesse operazioni, nello stesso ordine.
  * Le matrici dei pesi restano nella mmap del file GGUF; norm e bias (piccoli) vengono
@@ -31,6 +31,7 @@ typedef struct {
     float *bq, *bk, *bv; /* NULL senza bias */
     float *q_norm, *k_norm; /* NULL senza qk-norm */
     matrix wq, wk, wv, wo, gate, up, down;
+    matrix gate_inp; /* MoE: router; gate, up e down sono allora tensori 3D, un blocco per esperto */
 } layer;
 
 struct engine_model {
@@ -51,6 +52,10 @@ struct engine_ctx {
     float *k_cache, *v_cache; /* [n_layer][n_kv_head][max_seq][head_dim] */
     float *rope_cos, *rope_sin; /* [max_seq][head_dim/2] */
     float *x, *xb, *q, *k, *v, *att, *hb, *hb2, *scores, *logits;
+    /* MoE: router [n_batch][n_expert]; scelte e pesi [n_batch][k]; token e pesi raggruppati per
+     * esperto, dall'indice moe_start[e]; ingresso, uscita e somma degli esperti [n_batch][dim]. */
+    float *moe_probs, *moe_w, *moe_group_w, *moe_x, *moe_y, *moe_sum;
+    int32_t *moe_top, *moe_group_tok, *moe_start;
     /* Attivazioni quantizzate per i pesi quantizzati: [0] in Q8_0, [1] in Q8_K. Si quantizzano
      * una volta e servono a tutte le matmul con lo stesso ingresso (q, k, v; gate e up). */
     void *xq[2];
@@ -125,6 +130,7 @@ static const char *LAYER_SUFFIXES[] = {
     "attn_v.weight", "attn_v.bias", "attn_q_norm.weight", "attn_k_norm.weight",
     "attn_output.weight", "ffn_norm.weight",
     "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
+    "ffn_gate_inp.weight", "ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight",
 };
 
 /* Come _GGUF_TENSOR in engine/ref/llama.py: un tensore sconosciuto indica una variante
@@ -152,17 +158,20 @@ static const gguf_tensor *find(const gguf_file *gf, const char *name) {
     return i < 0 ? NULL : gguf_get_tensor(gf, (uint64_t)i);
 }
 
-/* Matrice [n_out][n_in] (ne = [n_in, n_out]) di tipo supportato. */
-static int get_matrix(const gguf_file *gf, const char *name, int n_in, int n_out, matrix *out,
+/* Tensore [n_expert][n_out][n_in] di tipo supportato; con n_expert = 0 una matrice [n_out][n_in]
+ * (ne = [n_in, n_out, n_expert]). */
+static int get_tensor(const gguf_file *gf, const char *name, int n_in, int n_out, int n_expert, matrix *out,
                       char *err, size_t err_len) {
     const gguf_tensor *t = find(gf, name);
     if (!t) {
         set_err(err, err_len, "tensore mancante: %s", name);
         return -1;
     }
-    if (t->n_dims != 2 || t->ne[0] != (uint64_t)n_in || t->ne[1] != (uint64_t)n_out) {
-        set_err(err, err_len, "%s: dimensioni [%llu, %llu], attese [%d, %d]", name,
-                (unsigned long long)t->ne[0], (unsigned long long)t->ne[1], n_in, n_out);
+    if (t->n_dims != (n_expert ? 3u : 2u) || t->ne[0] != (uint64_t)n_in || t->ne[1] != (uint64_t)n_out ||
+        (n_expert && t->ne[2] != (uint64_t)n_expert)) {
+        set_err(err, err_len, "%s: dimensioni [%llu, %llu, %llu], attese [%d, %d, %d]", name,
+                (unsigned long long)t->ne[0], (unsigned long long)t->ne[1], (unsigned long long)t->ne[2],
+                n_in, n_out, n_expert ? n_expert : 1);
         return -1;
     }
     if (!op_type_supported((int)t->type)) {
@@ -173,6 +182,11 @@ static int get_matrix(const gguf_file *gf, const char *name, int n_in, int n_out
     out->data = t->data;
     out->type = (int)t->type;
     return 0;
+}
+
+static int get_matrix(const gguf_file *gf, const char *name, int n_in, int n_out, matrix *out,
+                      char *err, size_t err_len) {
+    return get_tensor(gf, name, n_in, n_out, 0, out, err, err_len);
 }
 
 /* Vettore di n elementi convertito in fp32 in dst. */
@@ -221,7 +235,8 @@ static int read_config(engine_model *m, char *err, size_t err_len) {
     arch_buf[len] = '\0';
     engine_model_info *in = &m->info;
     if (!strcmp(arch_buf, "llama")) in->rope_interleaved = 1;
-    else if (!strcmp(arch_buf, "qwen2") || !strcmp(arch_buf, "qwen3")) in->rope_interleaved = 0;
+    else if (!strcmp(arch_buf, "qwen2") || !strcmp(arch_buf, "qwen3") || !strcmp(arch_buf, "qwen3moe"))
+        in->rope_interleaved = 0;
     else {
         set_err(err, err_len, "architettura %s non supportata", arch_buf);
         return -1;
@@ -241,6 +256,22 @@ static int read_config(engine_model *m, char *err, size_t err_len) {
     in->n_layer = (int32_t)v;
     if ((v = meta_int(&mt, "feed_forward_length", -1)) < 0) return -1;
     in->ffn_dim = (int32_t)v;
+    if (!strcmp(arch_buf, "qwen3moe")) {
+        if ((v = meta_int(&mt, "expert_count", -1)) < 0) return -1;
+        in->n_expert = (int32_t)v;
+        if ((v = meta_int(&mt, "expert_used_count", -1)) < 0) return -1;
+        in->n_expert_used = (int32_t)v;
+        if (in->n_expert_used > in->n_expert) {
+            set_err(err, err_len, "expert_used_count=%d oltre expert_count=%d", in->n_expert_used, in->n_expert);
+            return -1;
+        }
+        /* Come llama.cpp, se il metadato manca: ffn_dim è la somma degli esperti scelti. */
+        if ((v = meta_int(&mt, "expert_feed_forward_length", in->ffn_dim / in->n_expert_used)) <= 0) {
+            if (v == 0) set_err(err, err_len, "dimensione degli esperti nulla");
+            return -1;
+        }
+        in->ffn_exp_dim = (int32_t)v;
+    }
     if ((v = meta_int(&mt, "attention.head_count", -1)) < 0) return -1;
     in->n_head = (int32_t)v;
     if ((v = meta_int(&mt, "attention.head_count_kv", in->n_head)) < 0) return -1;
@@ -330,11 +361,20 @@ engine_model *engine_model_load(const char *path, char *err, size_t err_len) {
             get_matrix(m->gf, NAME("attn_q.weight"), dim, q_dim, &L->wq, err, err_len) ||
             get_matrix(m->gf, NAME("attn_k.weight"), dim, kv_dim, &L->wk, err, err_len) ||
             get_matrix(m->gf, NAME("attn_v.weight"), dim, kv_dim, &L->wv, err, err_len) ||
-            get_matrix(m->gf, NAME("attn_output.weight"), q_dim, dim, &L->wo, err, err_len) ||
-            get_matrix(m->gf, NAME("ffn_gate.weight"), dim, in->ffn_dim, &L->gate, err, err_len) ||
-            get_matrix(m->gf, NAME("ffn_up.weight"), dim, in->ffn_dim, &L->up, err, err_len) ||
-            get_matrix(m->gf, NAME("ffn_down.weight"), in->ffn_dim, dim, &L->down, err, err_len))
+            get_matrix(m->gf, NAME("attn_output.weight"), q_dim, dim, &L->wo, err, err_len))
             goto fail;
+        if (in->n_expert) {
+            int ne = in->n_expert, fe = in->ffn_exp_dim;
+            if (get_matrix(m->gf, NAME("ffn_gate_inp.weight"), dim, ne, &L->gate_inp, err, err_len) ||
+                get_tensor(m->gf, NAME("ffn_gate_exps.weight"), dim, fe, ne, &L->gate, err, err_len) ||
+                get_tensor(m->gf, NAME("ffn_up_exps.weight"), dim, fe, ne, &L->up, err, err_len) ||
+                get_tensor(m->gf, NAME("ffn_down_exps.weight"), fe, dim, ne, &L->down, err, err_len))
+                goto fail;
+        } else if (get_matrix(m->gf, NAME("ffn_gate.weight"), dim, in->ffn_dim, &L->gate, err, err_len) ||
+                   get_matrix(m->gf, NAME("ffn_up.weight"), dim, in->ffn_dim, &L->up, err, err_len) ||
+                   get_matrix(m->gf, NAME("ffn_down.weight"), in->ffn_dim, dim, &L->down, err, err_len)) {
+            goto fail;
+        }
         if (in->qkv_bias) {
             L->bq = vec;
             vec += q_dim;
@@ -400,13 +440,26 @@ static void layout(engine_ctx *c, arena *a) {
     c->k = arena_floats(a, B * kv_dim);
     c->v = arena_floats(a, B * kv_dim);
     c->att = arena_floats(a, B * q_dim);
-    c->hb = arena_floats(a, B * in->ffn_dim);
-    c->hb2 = arena_floats(a, B * in->ffn_dim);
+    size_t ffn = (size_t)(in->n_expert ? in->ffn_exp_dim : in->ffn_dim);
+    c->hb = arena_floats(a, B * ffn);
+    c->hb2 = arena_floats(a, B * ffn);
+    if (in->n_expert) {
+        size_t chosen = B * in->n_expert_used;
+        c->moe_probs = arena_floats(a, B * in->n_expert);
+        c->moe_w = arena_floats(a, chosen);
+        c->moe_group_w = arena_floats(a, chosen);
+        c->moe_x = arena_floats(a, B * in->dim);
+        c->moe_y = arena_floats(a, B * in->dim);
+        c->moe_sum = arena_floats(a, B * in->dim);
+        c->moe_top = (int32_t *)arena_floats(a, chosen); /* float e int32_t hanno la stessa taglia */
+        c->moe_group_tok = (int32_t *)arena_floats(a, chosen);
+        c->moe_start = (int32_t *)arena_floats(a, (size_t)in->n_expert + 1);
+    }
     c->scores = arena_floats(a, S * (size_t)c->n_threads); /* uno spazio per thread */
     c->logits = arena_floats(a, (c->logits_all ? B : 1) * (size_t)in->n_vocab);
     /* Ingresso più lungo di una matmul, arrotondato ai blocchi da 32 e 256. */
     size_t max_in = (size_t)in->dim > q_dim ? (size_t)in->dim : q_dim;
-    if ((size_t)in->ffn_dim > max_in) max_in = (size_t)in->ffn_dim;
+    if (ffn > max_in) max_in = ffn;
     size_t row0 = (max_in + 31) / 32 * 34, rowk = (max_in + 255) / 256 * 292;
     c->xq[0] = arena_floats(a, (B * row0 + 3) / 4);
     c->xq[1] = arena_floats(a, (B * rowk + 3) / 4);
@@ -591,6 +644,94 @@ static void silu_worker(void *arg, int ith, int nth) {
     op_silu_mul(j->gate + b, j->up + b, e - b);
 }
 
+/* ---------------------------------------------------------------- Mixture of Experts */
+
+/* I k esperti più probabili, dal più probabile; a pari probabilità vince l'indice più basso
+ * (come l'argsort stabile di engine/ref/llama.py). I pesi sommano a 1. */
+static void moe_select(const float *probs, int n_expert, int k, int32_t *top, float *w) {
+    int n = 0;
+    for (int e = 0; e < n_expert; e++) {
+        int pos = n;
+        while (pos > 0 && probs[e] > probs[top[pos - 1]]) pos--;
+        if (pos == k) continue;
+        for (int j = n < k ? n : k - 1; j > pos; j--) top[j] = top[j - 1];
+        top[pos] = e;
+        if (n < k) n++;
+    }
+    float sum = 0.0f;
+    for (int i = 0; i < k; i++) sum += probs[top[i]];
+    for (int i = 0; i < k; i++) w[i] = probs[top[i]] / sum;
+}
+
+typedef struct {
+    engine_ctx *c;
+    int n_tok;
+} router_job;
+
+static void router_worker(void *arg, int ith, int nth) {
+    const router_job *j = arg;
+    engine_ctx *c = j->c;
+    int ne = c->m->info.n_expert, k = c->m->info.n_expert_used;
+    int b, e;
+    split(j->n_tok, ith, nth, &b, &e);
+    for (int t = b; t < e; t++) {
+        float *probs = c->moe_probs + (size_t)t * ne;
+        op_softmax(probs, ne);
+        moe_select(probs, ne, k, c->moe_top + (size_t)t * k, c->moe_w + (size_t)t * k);
+    }
+}
+
+/* Raggruppa le scelte per esperto (counting sort): esperti e token in ordine crescente. */
+static void moe_group(engine_ctx *c, int n_tok) {
+    int ne = c->m->info.n_expert, k = c->m->info.n_expert_used, total = n_tok * k;
+    int32_t *start = c->moe_start;
+    memset(start, 0, ((size_t)ne + 1) * sizeof(*start));
+    for (int i = 0; i < total; i++) start[c->moe_top[i] + 1]++;
+    for (int e = 0; e < ne; e++) start[e + 1] += start[e];
+    for (int i = 0; i < total; i++) { /* start[e] avanza: alla fine vale l'inizio di e + 1 */
+        int32_t slot = start[c->moe_top[i]]++;
+        c->moe_group_tok[slot] = i / k;
+        c->moe_group_w[slot] = c->moe_w[i];
+    }
+    memmove(start + 1, start, (size_t)ne * sizeof(*start));
+    start[0] = 0;
+}
+
+/* Fetta di un esperto in un tensore 3D: è contigua, si legge come una matrice qualsiasi. */
+static matrix expert_matrix(const matrix *w, int e, int n_in, int n_out) {
+    matrix out = {(const uint8_t *)w->data + (size_t)e * n_out * op_row_size(w->type, n_in), w->type};
+    return out;
+}
+
+/* moe_sum[t] = Σ wᵢ · down_i(silu(gate_i·xb[t]) * up_i·xb[t]), come Llama.moe. */
+static void moe_ffn(engine_ctx *c, const layer *L, int n) {
+    const engine_model_info *in = &c->m->info;
+    int dim = in->dim, fe = in->ffn_exp_dim;
+    matmul(c, c->moe_probs, c->xb, &L->gate_inp, n, dim, in->n_expert, 1);
+    router_job rj = {c, n};
+    tp_run(c->pool, router_worker, &rj);
+    moe_group(c, n);
+
+    memset(c->moe_sum, 0, (size_t)n * dim * sizeof(float));
+    for (int e = 0; e < in->n_expert; e++) {
+        int first = c->moe_start[e], m = c->moe_start[e + 1] - first;
+        if (!m) continue;
+        const int32_t *tok = c->moe_group_tok + first;
+        const float *w = c->moe_group_w + first;
+        for (int r = 0; r < m; r++)
+            memcpy(c->moe_x + (size_t)r * dim, c->xb + (size_t)tok[r] * dim, (size_t)dim * sizeof(float));
+        matrix gate = expert_matrix(&L->gate, e, dim, fe), up = expert_matrix(&L->up, e, dim, fe);
+        matrix down = expert_matrix(&L->down, e, fe, dim);
+        matmul(c, c->hb, c->moe_x, &gate, m, dim, fe, 1);
+        matmul(c, c->hb2, c->moe_x, &up, m, dim, fe, 0);
+        silu_job sj = {c->hb, c->hb2, m * fe};
+        tp_run(c->pool, silu_worker, &sj);
+        matmul(c, c->moe_y, c->hb, &down, m, fe, dim, 1);
+        for (int r = 0; r < m; r++)
+            op_axpy(c->moe_sum + (size_t)tok[r] * dim, w[r], c->moe_y + (size_t)r * dim, dim);
+    }
+}
+
 /* ---------------------------------------------------------------- forward */
 
 /* Elabora n <= n_batch token a partire dalla posizione n_past. Se out_rows > 0 calcola i logits
@@ -644,15 +785,21 @@ static void forward(engine_ctx *c, const int32_t *tok, int n, int out_rows) {
         matmul(c, c->xb, c->att, &L->wo, n, q_dim, dim, 1);
         for (size_t i = 0; i < (size_t)n * dim; i++) c->x[i] += c->xb[i];
 
-        /* --- MLP SwiGLU: x = x + down(silu(gate·norm(x)) * up·norm(x)) */
+        /* --- MLP SwiGLU: x = x + down(silu(gate·norm(x)) * up·norm(x)), o la sua MoE */
         for (int t = 0; t < n; t++)
             op_rmsnorm(c->xb + (size_t)t * dim, c->x + (size_t)t * dim, L->ffn_norm, dim, in->norm_eps);
-        matmul(c, c->hb, c->xb, &L->gate, n, dim, in->ffn_dim, 1);
-        matmul(c, c->hb2, c->xb, &L->up, n, dim, in->ffn_dim, 0);
-        silu_job sj = {c->hb, c->hb2, n * in->ffn_dim};
-        tp_run(c->pool, silu_worker, &sj);
-        matmul(c, c->xb, c->hb, &L->down, n, in->ffn_dim, dim, 1);
-        for (size_t i = 0; i < (size_t)n * dim; i++) c->x[i] += c->xb[i];
+        const float *ffn_out = c->xb;
+        if (in->n_expert) {
+            moe_ffn(c, L, n);
+            ffn_out = c->moe_sum;
+        } else {
+            matmul(c, c->hb, c->xb, &L->gate, n, dim, in->ffn_dim, 1);
+            matmul(c, c->hb2, c->xb, &L->up, n, dim, in->ffn_dim, 0);
+            silu_job sj = {c->hb, c->hb2, n * in->ffn_dim};
+            tp_run(c->pool, silu_worker, &sj);
+            matmul(c, c->xb, c->hb, &L->down, n, in->ffn_dim, dim, 1);
+        }
+        for (size_t i = 0; i < (size_t)n * dim; i++) c->x[i] += ffn_out[i];
     }
 
     if (out_rows > 0) {
