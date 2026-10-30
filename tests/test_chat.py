@@ -125,6 +125,16 @@ def test_arguments_written_as_a_json_string():
     assert parse_tool_calls(f"<tool_call>{raw}</tool_call>")[1] == [CALL]
 
 
+def test_doubled_braces_like_the_qwen25_gguf_template():
+    assert parse_tool_calls('<tool_call>\n{{"name": "meteo", "arguments": {"città": "Roma"}}}\n</tool_call>')[1] == [CALL]
+    assert parse_tool_calls('<tool_call>{{"name": "ora"}}</tool_call>')[1] == [{"name": "ora", "arguments": {}}]
+
+
+def test_nested_arguments_ending_with_two_braces_are_untouched():
+    raw = '{"name": "x", "arguments": {"a": {"b": 1}}}'
+    assert parse_tool_calls(f"<tool_call>{raw}</tool_call>")[1] == [{"name": "x", "arguments": {"a": {"b": 1}}}]
+
+
 def test_missing_arguments_are_empty():
     assert parse_tool_calls('<tool_call>{"name": "ora"}</tool_call>')[1] == [{"name": "ora", "arguments": {}}]
 
@@ -133,7 +143,7 @@ def test_missing_arguments_are_empty():
                                   '<tool_call>{"arguments": {}}</tool_call>', '<tool_call>{"name": ""}</tool_call>',
                                   '<tool_call>{"name": "x", "arguments": 3}</tool_call>',
                                   '<tool_call>{"name": "x", "arguments": "{"}</tool_call>',
-                                  '<tool_call>{"name": "x"', "testo normale"])
+                                  '<tool_call>{{non json}}</tool_call>', '<tool_call>{"name": "x"', "testo normale"])
 def test_malformed_blocks_stay_text(text):
     assert parse_tool_calls(text) == (text, [])
 
@@ -161,7 +171,7 @@ def run_stream(pieces):
     return "".join(e[1] for e in events if e[0] == "text"), calls
 
 
-SAMPLES = ["ciao", BLOCK, "prima " + BLOCK + " dopo", BLOCK + BLOCK, "<tool_call>rotto</tool_call>", "<tool_call>mai chiuso",
+SAMPLES = ["ciao", BLOCK, BLOCK.replace('{"name', '{{"name').replace("}}", "}}}"), "prima " + BLOCK + " dopo", BLOCK + BLOCK, "<tool_call>rotto</tool_call>", "<tool_call>mai chiuso",
            "a < b e <tool e <tool_ca", f"<think>{BLOCK}</think>fine", f"<think>x</think>{BLOCK}", "<think>mai chiuso",
            "<", "</think>", "<think>"]
 

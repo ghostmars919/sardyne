@@ -61,9 +61,15 @@ def guard_message(msg: dict, tok: BPETokenizer) -> dict:
 
 
 def _valid_call(raw: str):
-    try:
-        call = json.loads(raw)
-    except ValueError:
+    # Il template nel GGUF ufficiale di Qwen2.5-3B ha l'esempio con {{ }} e il modello lo imita.
+    candidates = [raw, raw[1:-1]] if raw.startswith("{{") and raw.endswith("}}") else [raw]
+    for text in candidates:
+        try:
+            call = json.loads(text)
+            break
+        except ValueError:
+            continue
+    else:
         return None
     if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not call["name"]:
         return None
@@ -194,12 +200,15 @@ class ChatEngine:
         safe = [guard_message(m, self.tok) for m in messages]
         return self.tok.encode(self.template.render(safe, tools, enable_thinking=enable_thinking), guard=GUARD)
 
-    def stream(self, messages, tools=None, sampler=None, max_tokens: int = 1024, enable_thinking=None):
+    def stream(self, messages, tools=None, sampler=None, max_tokens: int = 1024, enable_thinking=None, prefix: str = ""):
         """Generatore di pezzi di testo. A fine corsa i conteggi sono in self.stats.
 
+        prefix: inizio obbligato della risposta, restituito come primo pezzo.
         Chi smette di leggere interrompe la generazione: serve al server quando il client si disconnette.
         """
         ids = self.prompt_ids(messages, tools, enable_thinking)
+        if prefix:
+            ids += self.tok.encode(prefix)
         room = self.ctx.max_seq - len(ids)
         if room < 1:
             raise ValueError(f"prompt di {len(ids)} token oltre il contesto di {self.ctx.max_seq}")
@@ -208,6 +217,8 @@ class ChatEngine:
         history = list(ids)
         decoder = Streamer(self.tok)
         logits = self._eval_prompt(ids)
+        if prefix:
+            yield prefix
         for i in range(min(max_tokens, room)):
             tid = sampler(logits, history)
             if tid in self.tok.eos_ids:

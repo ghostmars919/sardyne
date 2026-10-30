@@ -6,7 +6,8 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "regex", "jinja2"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "safetensors", "tokenizers", "huggingface_hub"]
+dev = ["pytest>=7", "safetensors", "tokenizers", "huggingface_hub", "httpx", "openai"]
+server = ["fastapi", "uvicorn"]
 # solo per i confronti con HF nei test (installare torch da https://download.pytorch.org/whl/cpu):
 ref = ["torch", "transformers"]
 
