@@ -341,6 +341,20 @@ def test_real_quantized_model(name):
     assert np.array_equal(one, logits)  # 1 thread o tutti: identici bit per bit
 
 
+def test_real_large_model():
+    """Qwen2.5-3B Q4_K_M: K-quant in tutte le matrici. La reference NumPy in fp32 non ci sta in RAM
+    (12 GB): si verificano una previsione ovvia e il determinismo tra thread."""
+    path = GGUF_DIR / "qwen2.5-3b-instruct-q4_k_m.gguf"
+    if not path.exists():
+        pytest.skip(f"{path.name} non scaricato")
+    ids = PROMPT_IDS["qwen2.5-0.5b-instruct-fp16.gguf"]  # "The capital of France is Paris. It is the"
+    model = Model(path)
+    logits = Context(model, max_seq=64, n_batch=len(ids), logits_all=True).eval(ids)
+    assert logits[4].argmax() == ids[5]  # "... France is" -> " Paris"
+    one = Context(model, max_seq=64, n_batch=len(ids), logits_all=True, n_threads=1).eval(ids)
+    assert np.array_equal(one, logits)
+
+
 def test_unsupported_quant_type_is_rejected(tmp_path):
     from engine.loader.gguf import GGUFFile, VALUE_TYPES
     from engine.loader.gguf_writer import GGUFWriter
