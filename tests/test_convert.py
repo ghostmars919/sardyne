@@ -57,6 +57,8 @@ def make_hf(path, arch="LlamaForCausalLM", bias=False, tied=True, head_dim=None,
             # Bias grandi: se non fossero permutati come i pesi, l'errore sarebbe evidente.
             for n, d in (("q", n_head * hd), ("k", n_kv * hd), ("v", n_kv * hd)):
                 t[p + f"self_attn.{n}_proj.bias"] = 2 * rng.standard_normal(d).astype(np.float32)
+        if arch == "Qwen3ForCausalLM":
+            t.update({p + "self_attn.q_norm.weight": 1 + w(hd), p + "self_attn.k_norm.weight": 1 + w(hd)})
     safetensors_np.save_file(t, str(path / "model.safetensors"))
     return path
 

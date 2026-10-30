@@ -56,7 +56,7 @@ class EngineModelInfo(ctypes.Structure):
     _fields_ = [(name, ctypes.c_int32) for name in
                 ("n_vocab", "dim", "n_layer", "n_head", "n_kv_head", "head_dim", "ffn_dim", "max_pos")] + \
                [("norm_eps", ctypes.c_float), ("rope_theta", ctypes.c_float)] + \
-               [(name, ctypes.c_int32) for name in ("rope_interleaved", "qkv_bias", "tied_embeddings")]
+               [(name, ctypes.c_int32) for name in ("rope_interleaved", "qkv_bias", "tied_embeddings", "qk_norm")]
 
 
 _vp, _i32, _fp = ctypes.c_void_p, ctypes.c_int32, ctypes.POINTER(ctypes.c_float)

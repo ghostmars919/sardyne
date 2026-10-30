@@ -35,13 +35,14 @@ typedef struct {
     int32_t rope_interleaved; /* 1: coppie (2i, 2i+1) come "llama"; 0: coppie (i, i+hd/2) come "qwen2" */
     int32_t qkv_bias;
     int32_t tied_embeddings;
+    int32_t qk_norm; /* Qwen3: RMSNorm per testa su q e k, prima della RoPE */
 } engine_model_info;
 
 /* Fase 0: smoke test della toolchain Python <-> C. */
 const char *engine_version(void);
 void engine_add_f32(const float *a, const float *b, float *out, size_t n);
 
-/* Carica un GGUF di architettura "llama" o "qwen2" con pesi F32/F16/BF16 o quantizzati (Q8_0, Q4_0,
+/* Carica un GGUF di architettura "llama", "qwen2" o "qwen3" con pesi F32/F16/BF16 o quantizzati (Q8_0, Q4_0,
  * Q5_0, Q4_K, Q6_K: i file Q8_0 e Q4_K_M più diffusi). NULL in caso di errore. */
 engine_model *engine_model_load(const char *path, char *err, size_t err_len);
 void engine_model_free(engine_model *m);

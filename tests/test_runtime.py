@@ -160,6 +160,7 @@ TOKENS = [3, 14, 15, 9, 26, 5, 35, 8, 2, 7, 1, 60]
 @pytest.fixture(scope="module", params=[
     ("llama", "f32"), ("llama", "f16"), ("llama", "bf16"),
     ("llama-bias-headdim", "bf16"), ("qwen2", "f32"), ("qwen2", "bf16"),
+    ("qwen3", "bf16"), ("qwen3", "q8_0"),
     ("llama", "q8_0"), ("llama", "q4_0"), ("llama-bias-headdim", "q8_0"), ("qwen2", "q4_0")],
     ids=lambda p: "-".join(p))
 def synthetic(request, tmp_path_factory):
@@ -167,7 +168,8 @@ def synthetic(request, tmp_path_factory):
 
     variant, outtype = request.param
     kwargs = {"llama": {}, "llama-bias-headdim": dict(bias=True, tied=False, head_dim=16),
-              "qwen2": dict(arch="Qwen2ForCausalLM", tied=False)}[variant]
+              "qwen2": dict(arch="Qwen2ForCausalLM", tied=False),
+              "qwen3": dict(arch="Qwen3ForCausalLM", head_dim=16)}[variant]
     tmp = tmp_path_factory.mktemp(f"{variant}-{outtype}")
     hf = make_hf(tmp / "hf", **kwargs)
     path = tmp / "m.gguf"
@@ -293,7 +295,8 @@ def test_rope_freqs_and_unknown_tensors_are_rejected(tmp_path):
 # ---------------------------------------------------------------- modelli reali (se scaricati)
 
 PROMPT_IDS = {"SmolLM2-135M-Instruct-f16.gguf": [504, 3575, 282, 4649, 314, 253, 1789, 30, 378, 5402],
-              "qwen2.5-0.5b-instruct-fp16.gguf": [785, 6722, 315, 9625, 374, 12095, 13, 1084, 374, 279]}
+              "qwen2.5-0.5b-instruct-fp16.gguf": [785, 6722, 315, 9625, 374, 12095, 13, 1084, 374, 279],
+              "qwen3-0.6b-bf16.gguf": [785, 6722, 315, 9625, 374, 12095, 13, 1084, 374, 279]}
 
 
 @pytest.mark.parametrize("name", sorted(PROMPT_IDS))

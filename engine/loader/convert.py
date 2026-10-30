@@ -6,7 +6,7 @@ Regole (come convert_hf_to_gguf.py di llama.cpp):
 - i tensori 1D (norm, bias) restano sempre F32; le matrici prendono il tipo scelto;
 - architettura "llama": righe di W_q e W_k (e dei loro bias, se ci sono) permutate, perché
   llama.cpp applica la RoPE alle coppie adiacenti (2i, 2i+1) mentre HF alle coppie (i, i + hd/2);
-- architettura "qwen2": nessuna permutazione, llama.cpp usa la RoPE "neox" come HF;
+- architetture "qwen2" e "qwen3": nessuna permutazione, llama.cpp usa la RoPE "neox" come HF;
 - con gli embedding condivisi, output.weight non viene scritto;
 - head_dim esplicito -> attention.key_length / value_length (oltre a rope.dimension_count).
 
@@ -27,7 +27,7 @@ from engine.loader import hf_config
 from engine.loader.gguf_writer import GGUFWriter, f32_to_bf16
 from engine.loader.safetensors import SafeTensorsDir
 
-HF_TO_GGUF_ARCH = {"LlamaForCausalLM": "llama", "Qwen2ForCausalLM": "qwen2"}
+HF_TO_GGUF_ARCH = {"LlamaForCausalLM": "llama", "Qwen2ForCausalLM": "qwen2", "Qwen3ForCausalLM": "qwen3"}
 FILE_TYPE = {"f32": 0, "f16": 1, "q4_0": 2, "q8_0": 7, "bf16": 32}  # general.file_type (enum llama_ftype)
 QUANT_TYPES = {"q8_0": "Q8_0", "q4_0": "Q4_0"}
 F16_MAX = float(np.finfo(np.float16).max)
@@ -42,6 +42,8 @@ LAYER_NAMES = {
     "self_attn.v_proj.weight": "attn_v.weight",
     "self_attn.v_proj.bias": "attn_v.bias",
     "self_attn.o_proj.weight": "attn_output.weight",
+    "self_attn.q_norm.weight": "attn_q_norm.weight",
+    "self_attn.k_norm.weight": "attn_k_norm.weight",
     "post_attention_layernorm.weight": "ffn_norm.weight",
     "mlp.gate_proj.weight": "ffn_gate.weight",
     "mlp.up_proj.weight": "ffn_up.weight",

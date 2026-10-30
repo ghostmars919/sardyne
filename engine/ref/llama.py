@@ -7,8 +7,9 @@ Rispetto al Transformer del paper (engine/ref/transformer.py):
 - MLP SwiGLU senza bias
 - RMSNorm finale prima della proiezione sul vocabolario
 
-Architetture supportate (config.json di HF): LlamaForCausalLM (Llama 2/3, SmolLM2) e
-Qwen2ForCausalLM (Qwen2/2.5: uguale a Llama più un bias su q, k, v).
+Architetture supportate (config.json di HF): LlamaForCausalLM (Llama 2/3, SmolLM2),
+Qwen2ForCausalLM (Qwen2/2.5: uguale a Llama più un bias su q, k, v) e Qwen3ForCausalLM (senza
+bias, con una RMSNorm per testa su q e k prima della RoPE).
 
 Uso: python -m engine.ref.llama models/SmolLM2-135M "The capital of France is" -n 30
 """
@@ -27,16 +28,16 @@ from engine.loader.gguf import GGUFFile
 from engine.loader.safetensors import SafeTensorsDir
 from engine.ref import ops
 
-SUPPORTED = {"LlamaForCausalLM", "Qwen2ForCausalLM"}
+SUPPORTED = {"LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"}
 
 # Architetture GGUF supportate -> RoPE a coppie adiacenti? Come in llama.cpp: "llama" usa la
 # RoPE "normale" (pesi q/k permutati dal convertitore), "qwen2" la RoPE "neox" (pesi invariati).
-GGUF_ARCHS = {"llama": True, "qwen2": False}
+GGUF_ARCHS = {"llama": True, "qwen2": False, "qwen3": False}
 
 # Tensori che sappiamo usare. Un tensore diverso (es. rope_freqs.weight dei Llama 3.1) indica una
 # variante dell'architettura non supportata: meglio un errore che un modello sbagliato in silenzio.
 _GGUF_TENSOR = re.compile(r"(token_embd|output_norm|output)\.weight"
-                          r"|blk\.\d+\.(attn_norm|attn_output|ffn_norm|ffn_gate|ffn_up|ffn_down)\.weight"
+                          r"|blk\.\d+\.(attn_norm|attn_q_norm|attn_k_norm|attn_output|ffn_norm|ffn_gate|ffn_up|ffn_down)\.weight"
                           r"|blk\.\d+\.attn_[qkv]\.(weight|bias)")
 
 
@@ -56,6 +57,7 @@ class LlamaConfig:
     max_pos: int
     # False: RoPE sulle coppie (i, i+hd/2) come in HF ("neox"); True: coppie adiacenti (2i, 2i+1).
     rope_interleaved: bool = False
+    qk_norm: bool = False  # Qwen3: RMSNorm per testa su q e k, prima della RoPE
 
     def __post_init__(self):
         if self.n_head % self.n_kv_head:
@@ -82,6 +84,7 @@ class LlamaConfig:
             tie_embeddings=cfg.get("tie_word_embeddings", False),
             qkv_bias=arch == "Qwen2ForCausalLM" or cfg.get("attention_bias", False),
             max_pos=cfg.get("max_position_embeddings", 2048),
+            qk_norm=arch == "Qwen3ForCausalLM",
         )
 
     @classmethod
@@ -121,6 +124,7 @@ class LlamaConfig:
             qkv_bias="blk.0.attn_q.bias" in gf.tensors,
             max_pos=int(m.get(f"{arch}.context_length", 2048)),
             rope_interleaved=GGUF_ARCHS[arch],
+            qk_norm="blk.0.attn_q_norm.weight" in gf.tensors,
         )
 
     def expected_shapes(self) -> dict:
@@ -132,6 +136,8 @@ class LlamaConfig:
                  "w_down": (self.dim, self.ffn_dim)}
         if self.qkv_bias:
             layer.update(bq=(q,), bk=(kv,), bv=(kv,))
+        if self.qk_norm:
+            layer.update(q_norm=(self.head_dim,), k_norm=(self.head_dim,))
         return {"embed": (self.vocab_size, self.dim), "lm_head": (self.vocab_size, self.dim),
                 "norm": (self.dim,), "layer": layer}
 
@@ -172,6 +178,9 @@ def load_weights_gguf(cfg: LlamaConfig, gf: GGUFFile) -> dict:
         if cfg.qkv_bias:
             for n in ("q", "k", "v"):
                 layer["b" + n] = gf.get_f32(pre + f"attn_{n}.bias")
+        if cfg.qk_norm:
+            for n in ("q", "k"):
+                layer[n + "_norm"] = gf.get_f32(pre + f"attn_{n}_norm.weight")
         p["layers"].append(layer)
     return p
 
@@ -201,6 +210,9 @@ def load_weights(cfg: LlamaConfig, st: SafeTensorsDir) -> dict:
         if cfg.qkv_bias:
             for n in ("q", "k", "v"):
                 layer["b" + n] = st.get_f32(pre + f"self_attn.{n}_proj.bias")
+        if cfg.qk_norm:
+            for n in ("q", "k"):
+                layer[n + "_norm"] = st.get_f32(pre + f"self_attn.{n}_norm.weight")
         p["layers"].append(layer)
     return p
 
@@ -288,6 +300,10 @@ class Llama:
         q = ops.split_heads(self.linear(x, layer["wq"], layer.get("bq")), c.n_head)  # [nh, T, hd]
         k = ops.split_heads(self.linear(x, layer["wk"], layer.get("bk")), c.n_kv_head)  # [nkv, T, hd]
         v = ops.split_heads(self.linear(x, layer["wv"], layer.get("bv")), c.n_kv_head)
+
+        if c.qk_norm:
+            q = ops.rms_norm(q, layer["q_norm"], c.norm_eps)
+            k = ops.rms_norm(k, layer["k_norm"], c.norm_eps)
 
         cos, sin = self.cos[pos0:pos0 + t], self.sin[pos0:pos0 + t]
         rope = ops.apply_rope_interleaved if c.rope_interleaved else ops.apply_rope

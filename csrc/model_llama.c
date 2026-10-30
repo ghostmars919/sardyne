@@ -1,4 +1,4 @@
-/* Runtime fp32 per modelli Llama-like (architetture GGUF "llama" e "qwen2").
+/* Runtime fp32 per modelli Llama-like (architetture GGUF "llama", "qwen2" e "qwen3").
  *
  * È la traduzione in C di engine/ref/llama.py: stesse operazioni, nello stesso ordine.
  * Le matrici dei pesi restano nella mmap del file GGUF; norm e bias (piccoli) vengono
@@ -29,6 +29,7 @@ typedef struct {
 typedef struct {
     float *attn_norm, *ffn_norm;
     float *bq, *bk, *bv; /* NULL senza bias */
+    float *q_norm, *k_norm; /* NULL senza qk-norm */
     matrix wq, wk, wv, wo, gate, up, down;
 } layer;
 
@@ -121,7 +122,8 @@ static int meta_float(const meta *mt, const char *suffix, double def, float *out
 
 static const char *LAYER_SUFFIXES[] = {
     "attn_norm.weight", "attn_q.weight", "attn_q.bias", "attn_k.weight", "attn_k.bias",
-    "attn_v.weight", "attn_v.bias", "attn_output.weight", "ffn_norm.weight",
+    "attn_v.weight", "attn_v.bias", "attn_q_norm.weight", "attn_k_norm.weight",
+    "attn_output.weight", "ffn_norm.weight",
     "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
 };
 
@@ -219,7 +221,7 @@ static int read_config(engine_model *m, char *err, size_t err_len) {
     arch_buf[len] = '\0';
     engine_model_info *in = &m->info;
     if (!strcmp(arch_buf, "llama")) in->rope_interleaved = 1;
-    else if (!strcmp(arch_buf, "qwen2")) in->rope_interleaved = 0;
+    else if (!strcmp(arch_buf, "qwen2") || !strcmp(arch_buf, "qwen3")) in->rope_interleaved = 0;
     else {
         set_err(err, err_len, "architettura %s non supportata", arch_buf);
         return -1;
@@ -273,6 +275,7 @@ static int read_config(engine_model *m, char *err, size_t err_len) {
     in->n_vocab = (int32_t)emb->ne[1];
     in->tied_embeddings = find(gf, "output.weight") == NULL;
     in->qkv_bias = find(gf, "blk.0.attn_q.bias") != NULL;
+    in->qk_norm = find(gf, "blk.0.attn_q_norm.weight") != NULL;
 
     for (uint64_t i = 0; i < gguf_n_tensors(gf); i++) {
         const char *name = gguf_get_tensor(gf, i)->name;
@@ -296,7 +299,8 @@ engine_model *engine_model_load(const char *path, char *err, size_t err_len) {
 
     const engine_model_info *in = &m->info;
     int dim = in->dim, q_dim = in->n_head * in->head_dim, kv_dim = in->n_kv_head * in->head_dim;
-    size_t per_layer = 2 * (size_t)dim + (in->qkv_bias ? (size_t)q_dim + 2 * (size_t)kv_dim : 0);
+    size_t per_layer = 2 * (size_t)dim + (in->qkv_bias ? (size_t)q_dim + 2 * (size_t)kv_dim : 0) +
+                       (in->qk_norm ? 2 * (size_t)in->head_dim : 0);
     m->vectors = malloc(((size_t)dim + per_layer * in->n_layer) * sizeof(float));
     m->layers = calloc((size_t)in->n_layer, sizeof(layer));
     if (!m->vectors || !m->layers) {
@@ -341,6 +345,15 @@ engine_model *engine_model_load(const char *path, char *err, size_t err_len) {
             if (get_vector(m->gf, NAME("attn_q.bias"), q_dim, L->bq, err, err_len) ||
                 get_vector(m->gf, NAME("attn_k.bias"), kv_dim, L->bk, err, err_len) ||
                 get_vector(m->gf, NAME("attn_v.bias"), kv_dim, L->bv, err, err_len))
+                goto fail;
+        }
+        if (in->qk_norm) {
+            L->q_norm = vec;
+            vec += in->head_dim;
+            L->k_norm = vec;
+            vec += in->head_dim;
+            if (get_vector(m->gf, NAME("attn_q_norm.weight"), in->head_dim, L->q_norm, err, err_len) ||
+                get_vector(m->gf, NAME("attn_k_norm.weight"), in->head_dim, L->k_norm, err, err_len))
                 goto fail;
         }
 #undef NAME
@@ -615,6 +628,10 @@ static void forward(engine_ctx *c, const int32_t *tok, int n, int out_rows) {
             int pos = pos0 + t;
             const float *cs = c->rope_cos + (size_t)pos * half, *sn = c->rope_sin + (size_t)pos * half;
             float *qt = c->q + (size_t)t * q_dim, *kt = c->k + (size_t)t * kv_dim, *vt = c->v + (size_t)t * kv_dim;
+            if (L->q_norm) {
+                for (int h = 0; h < in->n_head; h++) op_rmsnorm(qt + h * hd, qt + h * hd, L->q_norm, hd, in->norm_eps);
+                for (int h = 0; h < in->n_kv_head; h++) op_rmsnorm(kt + h * hd, kt + h * hd, L->k_norm, hd, in->norm_eps);
+            }
             op_rope(qt, in->n_head, hd, cs, sn, in->rope_interleaved);
             op_rope(kt, in->n_kv_head, hd, cs, sn, in->rope_interleaved);
             for (int h = 0; h < in->n_kv_head; h++) { /* K (già ruotato) e V nella cache */
