@@ -319,6 +319,14 @@ static int parse(gguf_file *f, reader *r) {
     return 0;
 }
 
+void gguf_prefetch(const void *p, size_t n) {
+    /* Il kernel tronca ogni richiesta a circa la dimensione massima di un I/O: a blocchi da 1 MiB. */
+    enum { CHUNK = 1 << 20 };
+    uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE), b = (uintptr_t)p & ~(page - 1), end = (uintptr_t)p + n;
+    for (; b < end; b += CHUNK)
+        posix_madvise((void *)b, end - b < CHUNK ? end - b : CHUNK, POSIX_MADV_WILLNEED);
+}
+
 gguf_file *gguf_open(const char *path, char *err, size_t err_len) {
     reader r = {.err = err, .err_len = err_len};
     if (err && err_len) err[0] = '\0';

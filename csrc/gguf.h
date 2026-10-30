@@ -61,6 +61,8 @@ typedef struct gguf_file gguf_file;
 /* Restituisce NULL in caso di errore e scrive il motivo in err. */
 gguf_file *gguf_open(const char *path, char *err, size_t err_len);
 void gguf_close(gguf_file *f);
+/* Chiede al sistema di caricare in anticipo n byte della mmap, senza aspettare la lettura. */
+void gguf_prefetch(const void *p, size_t n);
 
 uint32_t gguf_version(const gguf_file *f);
 uint32_t gguf_alignment(const gguf_file *f);

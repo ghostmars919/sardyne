@@ -359,6 +359,15 @@ def test_batching_and_cache(c_model):
 
 
 @needs_c
+def test_prefetch_does_not_change_results(c_model, monkeypatch):
+    model = Model(c_model)
+    with_prefetch = Context(model, max_seq=32, n_batch=len(TOKENS), logits_all=True).eval(TOKENS)
+    monkeypatch.setenv("ENGINE_NO_PREFETCH", "1")
+    without = Context(model, max_seq=32, n_batch=len(TOKENS), logits_all=True).eval(TOKENS)
+    assert np.array_equal(with_prefetch, without)
+
+
+@needs_c
 def test_c_uses_only_chosen_experts(tmp_path, tensors):
     """Stessa prova della reference: i pesi degli esperti non scelti diventano NaN."""
     ref = Llama.from_gguf(write_gguf(tmp_path / "a.gguf", tensors), max_seq=32)

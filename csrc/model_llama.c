@@ -46,7 +46,7 @@ struct engine_model {
 struct engine_ctx {
     const engine_model *m;
     int max_seq, n_batch, logits_all, n_past, n_logits;
-    int n_threads;
+    int n_threads, prefetch;
     threadpool *pool;
     void *arena;
     float *k_cache, *v_cache; /* [n_layer][n_kv_head][max_seq][head_dim] */
@@ -495,6 +495,8 @@ engine_ctx *engine_ctx_new(const engine_model *m, int32_t max_seq, int32_t n_bat
     c->n_batch = n_batch;
     c->logits_all = logits_all != 0;
     c->n_threads = n_threads ? n_threads : tp_default_threads();
+    const char *no_prefetch = getenv("ENGINE_NO_PREFETCH");
+    c->prefetch = !(no_prefetch && no_prefetch[0] && strcmp(no_prefetch, "0") != 0);
     if (!(c->pool = tp_new(c->n_threads))) {
         set_err(err, err_len, "impossibile creare %d thread", c->n_threads);
         free(c);
@@ -703,6 +705,21 @@ static matrix expert_matrix(const matrix *w, int e, int n_in, int n_out) {
     return out;
 }
 
+/* Gli esperti scelti si caricano in anticipo: leggerli con i page fault, un pezzo alla volta dentro
+ * le matmul, lascerebbe i thread ad aspettare il disco. */
+static void moe_prefetch(const engine_ctx *c, const layer *L) {
+    const engine_model_info *in = &c->m->info;
+    int dim = in->dim, fe = in->ffn_exp_dim;
+    size_t gate = fe * op_row_size(L->gate.type, dim), up = fe * op_row_size(L->up.type, dim);
+    size_t down = dim * op_row_size(L->down.type, fe);
+    for (int e = 0; e < in->n_expert; e++) {
+        if (c->moe_start[e] == c->moe_start[e + 1]) continue;
+        gguf_prefetch(expert_matrix(&L->gate, e, dim, fe).data, gate);
+        gguf_prefetch(expert_matrix(&L->up, e, dim, fe).data, up);
+        gguf_prefetch(expert_matrix(&L->down, e, fe, dim).data, down);
+    }
+}
+
 /* moe_sum[t] = Σ wᵢ · down_i(silu(gate_i·xb[t]) * up_i·xb[t]), come Llama.moe. */
 static void moe_ffn(engine_ctx *c, const layer *L, int n) {
     const engine_model_info *in = &c->m->info;
@@ -711,6 +728,7 @@ static void moe_ffn(engine_ctx *c, const layer *L, int n) {
     router_job rj = {c, n};
     tp_run(c->pool, router_worker, &rj);
     moe_group(c, n);
+    if (c->prefetch) moe_prefetch(c, L);
 
     memset(c->moe_sum, 0, (size_t)n * dim * sizeof(float));
     for (int e = 0; e < in->n_expert; e++) {
