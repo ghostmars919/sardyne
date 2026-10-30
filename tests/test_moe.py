@@ -1,4 +1,6 @@
 """Mixture of Experts (architettura GGUF "qwen3moe"): reference NumPy, caricamento lazy e runtime C."""
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -422,3 +424,19 @@ def test_c_rejects_unknown_expert_tensor(tmp_path, tensors):
     bad["blk.0.ffn_gate_shexp.weight"] = np.ones((FFN_EXP, DIM), np.float32)
     with pytest.raises(ValueError, match="ffn_gate_shexp"):
         Model(write_gguf(tmp_path / "m.gguf", bad))
+
+
+@needs_c
+def test_real_quantized_moe():
+    """Qwen3-30B-A3B Q4_K_M: reference lazy contro C, come per gli altri file reali. Serve qualche minuto."""
+    path = Path(__file__).resolve().parent.parent / "models" / "gguf" / "Qwen3-30B-A3B-Q4_K_M.gguf"
+    if not path.exists():
+        pytest.skip("Qwen3-30B-A3B-Q4_K_M.gguf non scaricato")
+    ids = [785, 6722, 315, 9625, 374, 12095, 13, 1084, 374, 279]  # "The capital of France is Paris. It is the"
+    model = Model(path)
+    logits = Context(model, max_seq=16, n_batch=len(ids), logits_all=True).eval(ids)
+    ref = Llama.from_gguf(path, max_seq=16, emulate_quant=True, lazy=True).forward(ids)
+    assert np.mean(logits.argmax(-1) == ref.argmax(-1)) >= 0.8
+    assert np.abs(logits - ref).mean() < 0.5
+    one = Context(model, max_seq=16, n_batch=len(ids), logits_all=True, n_threads=1).eval(ids)
+    assert np.array_equal(one, logits)  # 1 thread o tutti: identici bit per bit
