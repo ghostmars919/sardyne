@@ -438,58 +438,26 @@ class Llama:
         return out
 
 
-class _Streamer:
-    """Stampa il testo generato man mano, senza ridecodificare tutta la sequenza a ogni token.
-
-    Un token può contenere solo una parte di un carattere UTF-8 (il decoder restituisce allora
-    U+FFFD): si aspetta il token successivo. I token si accumulano fino a fine riga, così il
-    costo resta proporzionale alla lunghezza della riga, non dell'intero testo.
-    """
-
-    def __init__(self, tok):
-        self.tok = tok
-        self.cache = []
-        self.printed = 0
-
-    def __call__(self, tid):
-        self.cache.append(tid)
-        text = self.tok.decode(self.cache)
-        if text.endswith("�"):
-            return
-        print(text[self.printed:], end="", flush=True)
-        if text.endswith("\n"):
-            self.cache, self.printed = [], 0
-        else:
-            self.printed = len(text)
-
-
 def main():
-    from engine.tokenizer.hf import Tokenizer
+    from engine.tokenizer.bpe import BPETokenizer, Streamer
 
     ap = argparse.ArgumentParser(description="Generazione greedy con la reference NumPy")
     ap.add_argument("model", help="file .gguf oppure cartella HF (config.json, *.safetensors, tokenizer.json)")
     ap.add_argument("prompt")
     ap.add_argument("-n", type=int, default=40, help="token da generare")
-    ap.add_argument("--tokenizer", help="cartella HF con tokenizer.json (necessaria con i .gguf fino alla Fase 7)")
+    ap.add_argument("--tokenizer", help="cartella HF con tokenizer.json (default: quello del modello)")
     ap.add_argument("--lazy", action="store_true", help="solo .gguf: decodifica le matrici quando servono (file grandi)")
     args = ap.parse_args()
 
     if args.lazy and not args.model.endswith(".gguf"):
         ap.error("--lazy vale solo per i file .gguf")
-    tok_dir = args.tokenizer or args.model
-    if not (Path(tok_dir) / "tokenizer.json").exists():
-        ap.error("serve un tokenizer: con un .gguf passa --tokenizer models/<cartella HF>")
     if args.n < 0:
         ap.error("-n deve essere >= 0")
 
     t0 = time.perf_counter()
     model = Llama.load(args.model, max_seq=1024, lazy=args.lazy)
-    tok = Tokenizer.from_dir(tok_dir)
-    if args.model.endswith(".gguf"):
-        with GGUFFile(args.model) as gf:
-            eos = gf.metadata.get("tokenizer.ggml.eos_token_id")
-        if eos is not None:
-            tok.eos_ids = sorted(set(tok.eos_ids) | {int(eos)})
+    is_gguf = args.model.endswith(".gguf")
+    tok = BPETokenizer.load(args.model if is_gguf else None, args.tokenizer or (None if is_gguf else args.model))
     t_load = time.perf_counter() - t0
     c = model.cfg
     n_params = sum(a.size for a in [model.p["embed"], model.p["norm"]]) + sum(
@@ -504,7 +472,7 @@ def main():
         ap.error("il prompt non produce nessun token")
     print(args.prompt, end="", flush=True)
 
-    streamer = _Streamer(tok)
+    streamer = Streamer(tok)
     times = []
 
     def on_token(tid):

@@ -268,10 +268,10 @@ PROMPT = "In 1905 Albert Einstein published four papers that changed physics. Th
 @pytest.mark.parametrize("name", ["SmolLM2-135M", "Qwen2.5-0.5B"])
 def test_gguf_model_matches_safetensors(name, tmp_path):
     """bf16 -> GGUF bf16 è senza perdite: stessi logits della Fase 1 (llama: con pesi permutati)."""
-    from engine.tokenizer.hf import Tokenizer
+    from engine.tokenizer.bpe import BPETokenizer
 
     hf = model_dir(name)
-    ids = Tokenizer.from_dir(hf).encode(PROMPT)
+    ids = BPETokenizer.from_hf_dir(hf).encode(PROMPT)
     out = tmp_path / f"{name}-bf16.gguf"
     convert(hf, out, "bf16")
 
@@ -290,10 +290,10 @@ def test_published_gguf_matches_hf():
     path = GGUF_DIR / "SmolLM2-135M-Instruct-f16.gguf"
     if not path.exists():
         pytest.skip("GGUF non scaricato")
-    from engine.tokenizer.hf import Tokenizer
+    from engine.tokenizer.bpe import BPETokenizer
 
     hf = model_dir("SmolLM2-135M-Instruct")
-    ids = Tokenizer.from_dir(hf).encode(PROMPT)
+    ids = BPETokenizer.from_hf_dir(hf).encode(PROMPT)
     a, b = Llama.from_dir(hf, max_seq=96), Llama.from_gguf(path, max_seq=96)
     np.testing.assert_allclose(b.forward(ids), a.forward(ids), atol=1e-3, rtol=0)  # pesi arrotondati a f16
     assert b.generate(ids, 30) == a.generate(ids, 30)

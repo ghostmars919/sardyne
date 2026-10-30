@@ -6,7 +6,7 @@ la scelta del token e il tokenizer.
 Kernel SIMD (AVX2) e thread: vedi set_simd() e il parametro n_threads di Context.
 
 Uso: python -m engine.runtime models/gguf/SmolLM2-135M-Instruct-f16.gguf "The capital of France is" \\
-         --tokenizer models/SmolLM2-135M-Instruct -n 40 [--compare]
+         -n 40 [--compare]
 """
 import argparse
 import ctypes
@@ -131,14 +131,12 @@ def generate(ctx: Context, prompt, n_new: int, eos_ids=(), on_token=None) -> lis
 
 
 def main():
-    from engine.loader.gguf import GGUFFile
-    from engine.ref.llama import _Streamer
-    from engine.tokenizer.hf import Tokenizer
+    from engine.tokenizer.bpe import BPETokenizer, Streamer
 
     ap = argparse.ArgumentParser(description="Generazione greedy con il runtime C")
     ap.add_argument("model", help="file .gguf (llama, qwen2, qwen3, qwen3moe; F32/F16/BF16, Q8_0, Q4_K_M...)")
     ap.add_argument("prompt")
-    ap.add_argument("--tokenizer", required=True, help="cartella HF con tokenizer.json (fino alla Fase 7)")
+    ap.add_argument("--tokenizer", help="cartella HF con tokenizer.json (default: quello nel file .gguf)")
     ap.add_argument("-n", type=int, default=40, help="token da generare")
     ap.add_argument("--max-seq", type=int, default=1024)
     ap.add_argument("--threads", type=int, default=0, help="thread di calcolo (0 = uno per core)")
@@ -153,11 +151,7 @@ def main():
     t0 = time.perf_counter()
     model = Model(args.model)
     ctx = Context(model, max_seq=args.max_seq, n_threads=args.threads)
-    tok = Tokenizer.from_dir(args.tokenizer)
-    with GGUFFile(args.model) as gf:
-        eos = gf.metadata.get("tokenizer.ggml.eos_token_id")
-    if eos is not None:
-        tok.eos_ids = sorted(set(tok.eos_ids) | {int(eos)})
+    tok = BPETokenizer.load(args.model, args.tokenizer)
     i = model.info
     print(f"[runtime C: {i.n_layer} strati, dim {i.dim}, teste {i.n_head}/{i.n_kv_head} kv, "
           f"{ctx.n_threads} thread, {'AVX2' if simd() else 'scalare'}, caricato in {time.perf_counter() - t0:.2f}s]")
@@ -176,7 +170,7 @@ def main():
               f"(con pesi quantizzati l'errore delle attivazioni int8 cresce con la profondità)]")
 
     print(args.prompt, end="", flush=True)
-    streamer = _Streamer(tok)
+    streamer = Streamer(tok)
     times = []
 
     def on_token(tid):

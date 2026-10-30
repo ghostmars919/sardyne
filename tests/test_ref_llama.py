@@ -224,9 +224,9 @@ def test_matches_huggingface(name):
     path = ROOT / "models" / name
     if not (path / "config.json").exists():
         pytest.skip(f"modello {name} non scaricato")
-    from engine.tokenizer.hf import Tokenizer
+    from engine.tokenizer.bpe import BPETokenizer
 
-    tok = Tokenizer.from_dir(path)
+    tok = BPETokenizer.from_hf_dir(path)
     ids = tok.encode(PROMPT)
     ours = Llama.from_dir(path, max_seq=128)
     logits = ours.forward(ids)

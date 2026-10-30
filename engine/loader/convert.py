@@ -13,8 +13,7 @@ Regole (come convert_hf_to_gguf.py di llama.cpp):
 I tensori vengono letti e convertiti uno alla volta durante la scrittura: in memoria c'è un solo
 tensore alla volta, non l'intero modello.
 
-I metadati del tokenizer (vocabolario, merges) arriveranno in Fase 7: per ora i file prodotti
-servono al nostro motore, non a llama.cpp.
+Se la cartella contiene tokenizer.json, nel file finiscono anche vocabolario, merges e chat template.
 """
 import argparse
 import json
@@ -103,6 +102,20 @@ def _encode(name: str, data: np.ndarray, outtype: str) -> tuple[str, np.ndarray]
     return "BF16", f32_to_bf16(data)
 
 
+def tokenizer_metadata(w: GGUFWriter, hf_dir, vocab_size: int):
+    """Scrive il tokenizer con le stesse chiavi di llama.cpp."""
+    from engine.tokenizer.bpe import BPETokenizer
+
+    tok = BPETokenizer.from_hf_dir(hf_dir, vocab_size)
+    w.add("tokenizer.ggml.model", "gpt2")
+    w.add("tokenizer.ggml.pre", tok.pre)
+    w.add("tokenizer.ggml.tokens", tok.tokens, "ARRAY", "STRING")
+    w.add("tokenizer.ggml.token_type", tok.token_types, "ARRAY", "INT32")
+    w.add("tokenizer.ggml.merges", tok.merges, "ARRAY", "STRING")
+    if tok.chat_template:
+        w.add("tokenizer.chat_template", tok.chat_template)
+
+
 def convert(hf_dir, out_path, outtype: str = "bf16"):
     hf_dir = Path(hf_dir)
     cfg = json.loads((hf_dir / "config.json").read_text())
@@ -141,6 +154,9 @@ def convert(hf_dir, out_path, outtype: str = "bf16"):
     if eos:
         # Come llama.cpp: il primo è l'EOS "ufficiale"; gli altri (eot/eom) arriveranno con la Fase 7.
         w.add("tokenizer.ggml.eos_token_id", eos[0])
+
+    if (hf_dir / "tokenizer.json").exists():
+        tokenizer_metadata(w, hf_dir, cfg["vocab_size"])
 
     st = SafeTensorsDir(hf_dir)
     for hf_name in sorted(st.keys(), key=_layer_order):

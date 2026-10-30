@@ -3,10 +3,10 @@ name = "llm-engine"
 version = "0.0.1"
 description = "Motore di inferenza LLM open-weight (Python + C, CPU)"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.24", "regex", "jinja2"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "safetensors", "tokenizers", "jinja2", "huggingface_hub"]
+dev = ["pytest>=7", "safetensors", "tokenizers", "huggingface_hub"]
 # solo per i confronti con HF nei test (installare torch da https://download.pytorch.org/whl/cpu):
 ref = ["torch", "transformers"]
 

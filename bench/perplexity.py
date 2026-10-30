@@ -1,7 +1,6 @@
 """Perplexity su wikitext-2 con il runtime C, per confrontare la qualità delle quantizzazioni.
 
-Uso: python bench/perplexity.py models/gguf/qwen2.5-0.5b-instruct-{fp16,q8_0,q4_k_m}.gguf \\
-         --tokenizer models/Qwen2.5-0.5B-Instruct [--ctx 512] [--chunks 8]
+Uso: python bench/perplexity.py models/gguf/qwen2.5-0.5b-instruct-{fp16,q8_0,q4_k_m}.gguf [--ctx 512] [--chunks 8]
 
 Perplexity = exp(media di −log p(token corretto)): quanto il modello è "sorpreso" in media dal testo
 vero. Come llama-perplexity, il testo si divide in finestre da --ctx token e si contano solo i token
@@ -21,7 +20,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.runtime import Context, Model  # noqa: E402
-from engine.tokenizer.hf import Tokenizer  # noqa: E402
+from engine.tokenizer.bpe import BPETokenizer  # noqa: E402
 
 DATA = Path(__file__).resolve().parent.parent / "data" / "wikitext-2-raw" / "wiki.test.raw"
 
@@ -62,7 +61,7 @@ def perplexity(path, tokens, ctx_len, n_chunks, n_batch, n_threads):
 def main():
     ap = argparse.ArgumentParser(description="Perplexity su wikitext-2 (runtime C)")
     ap.add_argument("models", nargs="+", help="file .gguf della stessa famiglia (stesso tokenizer)")
-    ap.add_argument("--tokenizer", required=True)
+    ap.add_argument("--tokenizer", help="cartella HF (default: il tokenizer del primo file)")
     ap.add_argument("--ctx", type=int, default=512)
     ap.add_argument("--chunks", type=int, default=8)
     ap.add_argument("--batch", type=int, default=64)
@@ -71,7 +70,7 @@ def main():
     if not DATA.exists():
         ap.error(f"{DATA} mancante: eseguire python scripts/download_wikitext.py")
 
-    tokens = Tokenizer.from_dir(args.tokenizer).encode(DATA.read_text(encoding="utf-8"))
+    tokens = BPETokenizer.load(args.models[0], args.tokenizer).encode(DATA.read_text(encoding="utf-8"))
     n_chunks = min(args.chunks, len(tokens) // args.ctx)
     print(f"wikitext-2 test: {len(tokens)} token, {n_chunks} finestre da {args.ctx} "
           f"(contati gli ultimi {args.ctx // 2 - 1} di ogni finestra)")
