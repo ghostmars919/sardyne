@@ -155,16 +155,25 @@ class BPETokenizer:
             for piece in self._split.findall(part):
                 out.extend(self._bpe(piece))
 
-    def encode(self, text: str) -> list[int]:
-        """Riconosce i token speciali scritti nel testo: per un testo non fidato, vedi encode_plain."""
+    def encode(self, text: str, guard: str | None = None) -> list[int]:
+        """Riconosce i token speciali scritti nel testo. guard: il carattere inserito da guard_special,
+        che impedisce il riconoscimento e non finisce nel risultato."""
         out, pos = [], 0
+
+        def part(s):
+            self._encode_part(s.replace(guard, "") if guard else s, out)
+
         if self._special is not None:
             for m in self._special.finditer(text):
-                self._encode_part(text[pos:m.start()], out)
+                part(text[pos:m.start()])
                 out.append(self._ids[m.group()])
                 pos = m.end()
-        self._encode_part(text[pos:], out)
+        part(text[pos:])
         return out
+
+    def guard_special(self, text: str, guard: str) -> str:
+        """Inserisce guard dentro ogni token speciale del testo: per encode resta testo normale."""
+        return self._special.sub(lambda m: m.group()[0] + guard + m.group()[1:], text) if self._special else text
 
     def encode_plain(self, text: str) -> list[int]:
         """Come encode, ma i token speciali scritti nel testo restano testo normale."""
@@ -202,6 +211,10 @@ class Streamer:
 
     def text(self, tid: int) -> str:
         return self._dec.decode(self.tok.token_bytes(tid))
+
+    def flush(self) -> str:
+        """I byte rimasti a metà di un carattere, a fine generazione."""
+        return self._dec.decode(b"", final=True)
 
     def __call__(self, tid: int):
         print(self.text(tid), end="", flush=True)
