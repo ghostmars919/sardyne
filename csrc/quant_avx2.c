@@ -48,8 +48,8 @@ TARGET static inline __m256i nibbles_32(const uint8_t *qs) {
     return _mm256_and_si256(v, _mm256_set1_epi8(0x0F));
 }
 
-/* 32 bit -> 32 byte: 0xFF dove il bit è 1. Ogni byte di uscita prende il byte della parola che
- * contiene il suo bit, poi si confronta con una maschera che ha a 0 solo quel bit. */
+/* 32 bit -> 32 byte: 0xFF dove il bit è 1 (bytes_from_bits_32 di ggml). Ogni byte di uscita
+ * prende il byte della parola che contiene il suo bit, poi si confronta con una maschera che ha a 0 solo quel bit. */
 TARGET static inline __m256i bits_to_bytes(uint32_t bits) {
     const __m256i shuf = _mm256_set_epi64x(0x0303030303030303, 0x0202020202020202, 0x0101010101010101, 0);
     __m256i bytes = _mm256_shuffle_epi8(_mm256_set1_epi32((int)bits), shuf);
