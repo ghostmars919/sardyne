@@ -1,4 +1,4 @@
-# Build della libreria C (build/libengine.so|.dylib) e degli strumenti.
+# Build della libreria C (build/libsardyne.so|.dylib) e degli strumenti.
 #
 #   make              build ottimizzata in build/
 #   make debug        build con ASan/UBSan in build/debug/ (non tocca quella normale)
@@ -19,9 +19,9 @@ BUILD     ?= build
 SAN       := -fsanitize=address,undefined
 
 ifeq ($(shell uname -s),Darwin)
-  LIB := $(BUILD)/libengine.dylib
+  LIB := $(BUILD)/libsardyne.dylib
 else
-  LIB := $(BUILD)/libengine.so
+  LIB := $(BUILD)/libsardyne.so
 endif
 
 SRCS := $(wildcard csrc/*.c)
@@ -58,14 +58,14 @@ test: all
 test-asan: debug
 	LD_PRELOAD="$$($(CC) -print-file-name=libasan.so) $$($(CC) -print-file-name=libubsan.so)" \
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
-	LLM_ENGINE_LIB=build/debug/libengine.so \
+	SARDYNE_LIB=build/debug/libsardyne.so \
 	$(PYTHON) -m pytest -q -p no:cacheprovider tests/test_gguf.py tests/test_capi.py tests/test_runtime.py tests/test_quant.py tests/test_moe.py -k "not real_model and not real_quantized"
 
 test-tsan:
 	$(MAKE) BUILD=build/tsan ARCHFLAGS= CFLAGS="-std=c11 -O1 -g -Wall -Wextra -fPIC -fsanitize=thread" \
-		LDFLAGS="-lm -lpthread -fsanitize=thread" build/tsan/libengine.so
+		LDFLAGS="-lm -lpthread -fsanitize=thread" build/tsan/libsardyne.so
 	LD_PRELOAD="$$($(CC) -print-file-name=libtsan.so)" TSAN_OPTIONS="halt_on_error=1 report_signal_unsafe=0" \
-	LLM_ENGINE_LIB=build/tsan/libengine.so \
+	SARDYNE_LIB=build/tsan/libsardyne.so \
 	$(PYTHON) -m pytest -q -p no:cacheprovider tests/test_runtime.py tests/test_moe.py -k "thread or batching"
 
 clean:

@@ -5,7 +5,7 @@ la scelta del token e il tokenizer.
 
 Kernel SIMD (AVX2) e thread: vedi set_simd() e il parametro n_threads di Context.
 
-Uso: python -m engine.runtime models/gguf/SmolLM2-135M-Instruct-f16.gguf "The capital of France is" \\
+Uso: python -m sardyne.runtime models/gguf/SmolLM2-135M-Instruct-f16.gguf "The capital of France is" \\
          -n 40 [--compare]
 """
 import argparse
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from engine import capi
+from sardyne import capi
 
 
 def simd() -> bool:
@@ -151,15 +151,15 @@ def add_sampling_args(ap, temperature: float = 0.0):
 
 
 def sampling_params(args):
-    from engine.sampling import SamplingParams
+    from sardyne.sampling import SamplingParams
 
     return SamplingParams(args.temperature, args.top_k, args.top_p, args.min_p, args.repeat_penalty,
                           args.repeat_last_n, args.seed)
 
 
 def main():
-    from engine.sampling import Sampler
-    from engine.tokenizer.bpe import BPETokenizer, Streamer
+    from sardyne.sampling import Sampler
+    from sardyne.tokenizer.bpe import BPETokenizer, Streamer
 
     ap = argparse.ArgumentParser(description="Generazione greedy con il runtime C")
     ap.add_argument("model", help="file .gguf (llama, qwen2, qwen3, qwen3moe; F32/F16/BF16, Q8_0, Q4_K_M...)")
@@ -190,7 +190,7 @@ def main():
         ap.error("il prompt non produce nessun token")
 
     if args.compare:
-        from engine.ref.llama import Llama
+        from sardyne.ref.llama import Llama
 
         ref = Llama.from_gguf(args.model, max_seq=len(ids), emulate_quant=True, lazy=bool(model.info.n_expert))
         c_all = Context(model, max_seq=len(ids), n_batch=len(ids), logits_all=True)

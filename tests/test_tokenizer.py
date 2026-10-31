@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from engine.loader.convert import tokenizer_metadata
-from engine.loader.gguf import GGUFFile
-from engine.loader.gguf_writer import GGUFWriter
-from engine.tokenizer.bpe import CONTROL, NORMAL, UNUSED, BPETokenizer, Streamer, bytes_to_unicode
+from sardyne.loader.convert import tokenizer_metadata
+from sardyne.loader.gguf import GGUFFile
+from sardyne.loader.gguf_writer import GGUFWriter
+from sardyne.tokenizer.bpe import CONTROL, NORMAL, UNUSED, BPETokenizer, Streamer, bytes_to_unicode
 
 tokenizers = pytest.importorskip("tokenizers")
 

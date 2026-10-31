@@ -17,9 +17,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from engine.loader.gguf import GGUFFile  # noqa: E402
-from engine.ref.llama import Llama  # noqa: E402
-from engine.runtime import Context, Model, set_simd  # noqa: E402
+from sardyne.loader.gguf import GGUFFile  # noqa: E402
+from sardyne.ref.llama import Llama  # noqa: E402
+from sardyne.runtime import Context, Model, set_simd  # noqa: E402
 
 
 def weight_bytes_per_token(path, as_f32=False) -> int:

@@ -6,14 +6,14 @@
  * Il file viene mappato in memoria una volta: i dati dei tensori restano nel file e
  * `gguf_tensor.data` punta direttamente dentro la mappatura (zero copie). Il sistema
  * operativo carica le pagine quando servono e può scaricarle sotto pressione di memoria.
- * Il formato è descritto in engine/loader/gguf.py.
+ * Il formato è descritto in sardyne/loader/gguf.py.
  *
  * Il file viene validato una sola volta, all'apertura: chiavi e nomi UTF-8 senza NUL e senza
  * duplicati, dimensioni non nulle e senza overflow, dati dentro il file e allineati.
  * Limite noto (come in llama.cpp): il file NON deve essere troncato o riscritto sul posto mentre
  * è aperto. Le pagine oltre la nuova fine non esistono più e leggerle termina il processo con
  * SIGBUS. Chi scrive file GGUF deve sostituirli in modo atomico (nuovo file + rename), come fa
- * engine/loader/gguf_writer.py: chi ha già mappato il vecchio file continua a vederlo intatto.
+ * sardyne/loader/gguf_writer.py: chi ha già mappato il vecchio file continua a vederlo intatto.
  */
 
 #include <stddef.h>

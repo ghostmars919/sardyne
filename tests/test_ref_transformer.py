@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from engine.ref import ops
-from engine.ref.transformer import Config, KVCache, Transformer, init_params
+from sardyne.ref import ops
+from sardyne.ref.transformer import Config, KVCache, Transformer, init_params
 
 
 @pytest.fixture(scope="module")

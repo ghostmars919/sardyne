@@ -19,8 +19,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from engine.runtime import Context, Model  # noqa: E402
-from engine.tokenizer.bpe import BPETokenizer  # noqa: E402
+from sardyne.runtime import Context, Model  # noqa: E402
+from sardyne.tokenizer.bpe import BPETokenizer  # noqa: E402
 
 DATA = Path(__file__).resolve().parent.parent / "data" / "wikitext-2-raw" / "wiki.test.raw"
 

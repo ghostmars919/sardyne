@@ -1,7 +1,7 @@
 #ifndef OPS_H
 #define OPS_H
 
-/* Kernel in fp32. Ogni funzione ha una controparte NumPy in engine/ref/ops.py e un test di
+/* Kernel in fp32. Ogni funzione ha una controparte NumPy in sardyne/ref/ops.py e un test di
  * confronto in tests/test_runtime.py.
  *
  * Convenzione dei pesi: matrice [n_out][n_in] row-major (layout di PyTorch e GGUF), quindi

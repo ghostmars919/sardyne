@@ -1,6 +1,6 @@
 """Server HTTP compatibile OpenAI, con FastAPI.
 
-Uso: python -m engine.server models/gguf/qwen2.5-3b-instruct-q4_k_m.gguf [--port 8080] [--api-key SEGRETO]
+Uso: python -m sardyne.server models/gguf/qwen2.5-3b-instruct-q4_k_m.gguf [--port 8080] [--api-key SEGRETO]
 
 Endpoint: POST /v1/chat/completions (con e senza stream, con strumenti), GET /v1/models, GET /health.
 Il modello è uno e la KV cache pure: si genera una richiesta alla volta, le altre aspettano il loro turno.
@@ -24,8 +24,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from engine.chat import TOOL_OPEN, ChatEngine, ToolCallStream, parse_tool_calls
-from engine.sampling import Sampler, SamplingParams
+from sardyne.chat import TOOL_OPEN, ChatEngine, ToolCallStream, parse_tool_calls
+from sardyne.sampling import Sampler, SamplingParams
 
 
 class ChatRequest(BaseModel):
@@ -135,7 +135,7 @@ def error_body(message: str, kind: str = "invalid_request_error", code: str | No
 
 def create_app(engine: ChatEngine, name: str = "local", api_key: str | None = None,
                defaults: SamplingParams | None = None, max_tokens: int = 1024) -> FastAPI:
-    app = FastAPI(title="llm-engine")
+    app = FastAPI(title="sardyne")
     defaults = defaults or SamplingParams(temperature=0.7)
     turn = asyncio.Lock()
     created = int(time.time())
@@ -277,7 +277,7 @@ def create_app(engine: ChatEngine, name: str = "local", api_key: str | None = No
 def main():
     import uvicorn
 
-    from engine.runtime import add_sampling_args, sampling_params
+    from sardyne.runtime import add_sampling_args, sampling_params
 
     ap = argparse.ArgumentParser(description="Server compatibile OpenAI")
     ap.add_argument("model")

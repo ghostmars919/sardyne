@@ -17,7 +17,7 @@ Layout del file (tutti gli interi little-endian):
 Dimensioni: ne[0] è la dimensione più interna (contigua). Una matrice HF [d_out, d_in] ha
 ne = [d_in, d_out]: la shape NumPy è ne rovesciato.
 
-Uso da riga di comando: python -m engine.loader.gguf file.gguf [--all]
+Uso da riga di comando: python -m sardyne.loader.gguf file.gguf [--all]
 """
 import argparse
 import math
@@ -27,8 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-from engine import quant
-from engine.loader.safetensors import bf16_to_f32
+from sardyne import quant
+from sardyne.loader.safetensors import bf16_to_f32
 
 GGUF_MAGIC = b"GGUF"
 DEFAULT_ALIGNMENT = 32
@@ -246,7 +246,7 @@ class GGUFFile:
         """Vista senza copie sui dati del tensore.
 
         F32/F16/BF16 (BF16 come uint16): shape NumPy del tensore.
-        Tipi quantizzati: uint8 [righe, byte per riga] (decodifica: get_f32, engine/quant.py).
+        Tipi quantizzati: uint8 [righe, byte per riga] (decodifica: get_f32, sardyne/quant.py).
         """
         if self._mm is None:
             raise ValueError("file GGUF già chiuso")

@@ -4,16 +4,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from engine import capi, quant
-from engine.loader.gguf import GGUFFile, LazyTensor
-from engine.loader.gguf_writer import GGUFWriter, f32_to_bf16
-from engine.ref import ops
-from engine.ref.llama import Llama
-from engine.runtime import Context, Model, generate, set_simd
+from sardyne import capi, quant
+from sardyne.loader.gguf import GGUFFile, LazyTensor
+from sardyne.loader.gguf_writer import GGUFWriter, f32_to_bf16
+from sardyne.ref import ops
+from sardyne.ref.llama import Llama
+from sardyne.runtime import Context, Model, generate, set_simd
 
 DIM, N_HEAD, N_KV, HEAD_DIM, FFN_EXP, VOCAB, N_LAYER = 32, 4, 2, 16, 64, 50, 2
 TOKENS = [3, 14, 15, 9, 26, 5, 35, 8, 2, 7, 1, 40]
-needs_c = pytest.mark.skipif(not capi.available(), reason="libengine non compilata: eseguire make")
+needs_c = pytest.mark.skipif(not capi.available(), reason="libsardyne non compilata: eseguire make")
 
 
 def weights(n_expert, seed=0, same_experts=False, dim=DIM, head_dim=HEAD_DIM, ffn_exp=FFN_EXP):

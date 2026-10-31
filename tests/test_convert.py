@@ -4,11 +4,11 @@ import json
 import numpy as np
 import pytest
 
-from engine.loader import hf_config
-from engine.loader.convert import convert
-from engine.loader.gguf import GGUFFile
-from engine.loader.gguf_writer import GGUFWriter
-from engine.ref.llama import Llama, LlamaConfig
+from sardyne.loader import hf_config
+from sardyne.loader.convert import convert
+from sardyne.loader.gguf import GGUFFile
+from sardyne.loader.gguf_writer import GGUFWriter
+from sardyne.ref.llama import Llama, LlamaConfig
 
 safetensors_np = pytest.importorskip("safetensors.numpy")
 
@@ -130,7 +130,7 @@ def test_rope_freqs_tensor_is_rejected(tmp_path):
     w = GGUFWriter(tmp_path / "llama3.gguf")
     for k, v in src.metadata.items():
         vt, et = src.metadata_types[k]
-        from engine.loader.gguf import VALUE_TYPES
+        from sardyne.loader.gguf import VALUE_TYPES
         w.add(k, v, VALUE_TYPES[vt][0], VALUE_TYPES[et][0] if et is not None else None)
     for name in src.tensors:
         w.add_tensor(name, src.get_f32(name), "F32")

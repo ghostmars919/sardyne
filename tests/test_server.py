@@ -11,9 +11,9 @@ pytest.importorskip("fastapi")
 httpx = pytest.importorskip("httpx")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from engine import capi  # noqa: E402
-from engine.chat import ChatStats  # noqa: E402
-from engine.server import StopFilter, create_app, normalize_messages  # noqa: E402
+from sardyne import capi  # noqa: E402
+from sardyne.chat import ChatStats  # noqa: E402
+from sardyne.server import StopFilter, create_app, normalize_messages  # noqa: E402
 
 GGUF_06 = Path(__file__).resolve().parent.parent / "models" / "gguf" / "qwen3-0.6b-bf16.gguf"
 USER = [{"role": "user", "content": "ciao"}]
@@ -338,7 +338,7 @@ def real():
     openai = pytest.importorskip("openai")
     if not capi.available() or not GGUF_06.exists():
         pytest.skip("serve qwen3-0.6b-bf16.gguf")
-    from engine.chat import ChatEngine
+    from sardyne.chat import ChatEngine
 
     server, thread, url = serve(ChatEngine(GGUF_06, max_seq=512), api_key="k")
     yield openai.OpenAI(base_url=url + "/v1", api_key="k")

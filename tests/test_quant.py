@@ -5,12 +5,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from engine import capi, quant
-from engine.loader.gguf import GGML_TYPE_ID, GGUFFile
+from sardyne import capi, quant
+from sardyne.loader.gguf import GGML_TYPE_ID, GGUFFile
 
 ROOT = Path(__file__).resolve().parent.parent
 GGUF = ROOT / "models" / "gguf"
-needs_c = pytest.mark.skipif(not capi.available(), reason="libengine non compilata: eseguire make")
+needs_c = pytest.mark.skipif(not capi.available(), reason="libsardyne non compilata: eseguire make")
 WEIGHT_TYPES = ["Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q6_K"]
 
 
@@ -107,7 +107,7 @@ def ptr(a):
 
 @pytest.fixture(params=[False, True], ids=["scalare", "avx2"])
 def kernels(request):
-    from engine.runtime import set_simd
+    from sardyne.runtime import set_simd
 
     if request.param and not set_simd(True):
         pytest.skip("CPU senza AVX2")
@@ -169,7 +169,7 @@ def test_vec_dot_matches_numpy(kernels, kind):
 @needs_c
 @pytest.mark.parametrize("kind", ["Q4_K", "Q6_K"])
 def test_k_quants_scalar_and_avx2_are_identical(kind):
-    from engine.runtime import set_simd
+    from sardyne.runtime import set_simd
 
     if not set_simd(True):
         pytest.skip("CPU senza AVX2")

@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from engine.sampling import Sampler, SamplingParams, apply_repeat_penalty, keep_mask, softmax
+from sardyne.sampling import Sampler, SamplingParams, apply_repeat_penalty, keep_mask, softmax
 
 P = np.array([0.05, 0.4, 0.1, 0.3, 0.15])  # in ordine: 1, 3, 4, 2, 0
 LOGITS = np.log(P)
@@ -118,17 +118,17 @@ def test_bad_params(kw):
 def tiny_model(tmp_path):
     from test_moe import TOKENS, weights, write_gguf
 
-    from engine.runtime import Context, Model
+    from sardyne.runtime import Context, Model
 
     path = write_gguf(tmp_path / "m.gguf", weights(8))
     return Context(Model(path), max_seq=48), TOKENS[:4]
 
 
 def test_generate_default_is_greedy_and_sampler_is_reproducible(tmp_path):
-    from engine import capi
+    from sardyne import capi
     if not capi.available():
-        pytest.skip("libengine non compilata")
-    from engine.runtime import generate
+        pytest.skip("libsardyne non compilata")
+    from sardyne.runtime import generate
 
     ctx, prompt = tiny_model(tmp_path)
     greedy = generate(ctx, prompt, 12)
@@ -140,10 +140,10 @@ def test_generate_default_is_greedy_and_sampler_is_reproducible(tmp_path):
 
 
 def test_generate_passes_prompt_and_new_tokens_to_the_penalty(tmp_path):
-    from engine import capi
+    from sardyne import capi
     if not capi.available():
-        pytest.skip("libengine non compilata")
-    from engine.runtime import generate
+        pytest.skip("libsardyne non compilata")
+    from sardyne.runtime import generate
 
     ctx, prompt = tiny_model(tmp_path)
     seen = []

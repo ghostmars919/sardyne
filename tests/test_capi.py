@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from engine import capi
+from sardyne import capi
 
-pytestmark = pytest.mark.skipif(not capi.available(), reason="libengine non compilata: eseguire make")
+pytestmark = pytest.mark.skipif(not capi.available(), reason="libsardyne non compilata: eseguire make")
 
 
 def test_version():
@@ -18,7 +18,7 @@ def test_add_matches_numpy():
 
 
 def test_missing_library_gives_clear_error(monkeypatch, tmp_path):
-    monkeypatch.setenv("LLM_ENGINE_LIB", str(tmp_path / "manca.so"))
+    monkeypatch.setenv("SARDYNE_LIB", str(tmp_path / "manca.so"))
     monkeypatch.setattr(capi, "_lib", None)
     assert not capi.available()
     with pytest.raises(OSError, match="make"):

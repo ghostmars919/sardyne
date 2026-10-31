@@ -5,9 +5,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from engine.loader.safetensors import SafeTensorsFile, bf16_to_f32
-from engine.ref import ops
-from engine.ref.llama import Llama, LlamaConfig
+from sardyne.loader.safetensors import SafeTensorsFile, bf16_to_f32
+from sardyne.ref import ops
+from sardyne.ref.llama import Llama, LlamaConfig
 
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ["SmolLM2-135M", "Qwen2.5-0.5B"]
@@ -224,7 +224,7 @@ def test_matches_huggingface(name):
     path = ROOT / "models" / name
     if not (path / "config.json").exists():
         pytest.skip(f"modello {name} non scaricato")
-    from engine.tokenizer.bpe import BPETokenizer
+    from sardyne.tokenizer.bpe import BPETokenizer
 
     tok = BPETokenizer.from_hf_dir(path)
     ids = tok.encode(PROMPT)

@@ -375,7 +375,7 @@ void op_silu_mul(float *gate, const float *up, int n) {
 void op_rope_table(float *cos_out, float *sin_out, int n_pos, int head_dim, float theta) {
     int half = head_dim / 2;
     for (int i = 0; i < half; i++) {
-        /* In double come in engine/ref/ops.py::rope_cos_sin. */
+        /* In double come in sardyne/ref/ops.py::rope_cos_sin. */
         double inv_freq = 1.0 / pow((double)theta, (double)(2 * i) / head_dim);
         for (int p = 0; p < n_pos; p++) {
             double angle = (double)p * inv_freq;

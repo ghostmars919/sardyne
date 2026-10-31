@@ -5,17 +5,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from engine import capi
-from engine.loader.convert import convert, permute_for_interleaved_rope
-from engine.loader.gguf import GGUFError, GGUFFile
-from engine.loader.gguf_writer import GGUFWriter, f32_to_bf16
-from engine.ref import ops
-from engine.ref.llama import Llama
+from sardyne import capi
+from sardyne.loader.convert import convert, permute_for_interleaved_rope
+from sardyne.loader.gguf import GGUFError, GGUFFile
+from sardyne.loader.gguf_writer import GGUFWriter, f32_to_bf16
+from sardyne.ref import ops
+from sardyne.ref.llama import Llama
 
 ROOT = Path(__file__).resolve().parent.parent
 GGUF_DIR = ROOT / "models" / "gguf"
 DOWNLOADED = sorted(p for p in GGUF_DIR.glob("*.gguf")) if GGUF_DIR.exists() else []
-needs_c = pytest.mark.skipif(not capi.available(), reason="libengine non compilata: eseguire make")
+needs_c = pytest.mark.skipif(not capi.available(), reason="libsardyne non compilata: eseguire make")
 
 
 def CGGUFFile(path):
@@ -268,7 +268,7 @@ PROMPT = "In 1905 Albert Einstein published four papers that changed physics. Th
 @pytest.mark.parametrize("name", ["SmolLM2-135M", "Qwen2.5-0.5B"])
 def test_gguf_model_matches_safetensors(name, tmp_path):
     """bf16 -> GGUF bf16 è senza perdite: stessi logits della Fase 1 (llama: con pesi permutati)."""
-    from engine.tokenizer.bpe import BPETokenizer
+    from sardyne.tokenizer.bpe import BPETokenizer
 
     hf = model_dir(name)
     ids = BPETokenizer.from_hf_dir(hf).encode(PROMPT)
@@ -290,7 +290,7 @@ def test_published_gguf_matches_hf():
     path = GGUF_DIR / "SmolLM2-135M-Instruct-f16.gguf"
     if not path.exists():
         pytest.skip("GGUF non scaricato")
-    from engine.tokenizer.bpe import BPETokenizer
+    from sardyne.tokenizer.bpe import BPETokenizer
 
     hf = model_dir("SmolLM2-135M-Instruct")
     ids = BPETokenizer.from_hf_dir(hf).encode(PROMPT)

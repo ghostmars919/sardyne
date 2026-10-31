@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from engine import capi
-from engine.chat import GUARD, ChatEngine, ChatTemplate, ToolCallStream, guard_message, parse_tool_calls, split_reasoning
-from engine.cli import ThinkFilter
-from engine.sampling import Sampler, SamplingParams
-from engine.tokenizer.bpe import BPETokenizer
+from sardyne import capi
+from sardyne.chat import GUARD, ChatEngine, ChatTemplate, ToolCallStream, guard_message, parse_tool_calls, split_reasoning
+from sardyne.cli import ThinkFilter
+from sardyne.sampling import Sampler, SamplingParams
+from sardyne.tokenizer.bpe import BPETokenizer
 
 ROOT = Path(__file__).resolve().parent.parent
 FOLDERS = ["Qwen3-0.6B", "Qwen2.5-0.5B-Instruct", "SmolLM2-135M-Instruct"]

@@ -1,6 +1,6 @@
-"""Binding ctypes verso libengine.
+"""Binding ctypes verso libsardyne.
 
-La libreria viene caricata al primo uso: da build/ oppure dal percorso in LLM_ENGINE_LIB
+La libreria viene caricata al primo uso: da build/ oppure dal percorso in SARDYNE_LIB
 (utile per usare la build con i sanitizer, vedi `make debug`). Così importare questo modulo
 non fallisce se la libreria non è ancora compilata.
 """
@@ -12,7 +12,7 @@ import sys
 import numpy as np
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
-_LIBNAME = "libengine.dylib" if sys.platform == "darwin" else "libengine.so"
+_LIBNAME = "libsardyne.dylib" if sys.platform == "darwin" else "libsardyne.so"
 
 _f32p = np.ctypeslib.ndpointer(dtype=np.float32, flags="C_CONTIGUOUS")
 _u64 = ctypes.c_uint64
@@ -103,7 +103,7 @@ _SIGNATURES.update({
 
 
 def lib_path() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("LLM_ENGINE_LIB", _ROOT / "build" / _LIBNAME))
+    return pathlib.Path(os.environ.get("SARDYNE_LIB", _ROOT / "build" / _LIBNAME))
 
 
 def available() -> bool:
@@ -140,7 +140,7 @@ def add(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------- GGUF (csrc/gguf.h)
 
 class CGGUFFile:
-    """Il parser C visto da Python: serve a confrontarlo con engine/loader/gguf.py.
+    """Il parser C visto da Python: serve a confrontarlo con sardyne/loader/gguf.py.
 
     Tutti i valori restituiti sono copie (stringhe, interi, byte dei tensori): niente resta legato
     alla mmap del C, quindi nulla diventa invalido dopo close().

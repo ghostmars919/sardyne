@@ -18,9 +18,9 @@ from datetime import datetime
 from jinja2.ext import loopcontrols
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
-from engine.runtime import Context, Model
-from engine.sampling import Sampler
-from engine.tokenizer.bpe import BPETokenizer, Streamer
+from sardyne.runtime import Context, Model
+from sardyne.sampling import Sampler
+from sardyne.tokenizer.bpe import BPETokenizer, Streamer
 
 GUARD = ""  # area privata: nessun testo normale lo contiene, e viene comunque tolto dall'ingresso
 TOOL_OPEN, TOOL_CLOSE = "<tool_call>", "</tool_call>"

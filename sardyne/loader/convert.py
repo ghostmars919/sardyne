@@ -1,6 +1,6 @@
 """Conversione di un modello HF (safetensors) in GGUF, con le stesse convenzioni di llama.cpp.
 
-Uso: python -m engine.loader.convert models/SmolLM2-135M models/gguf/SmolLM2-135M-bf16.gguf --outtype bf16
+Uso: python -m sardyne.loader.convert models/SmolLM2-135M models/gguf/SmolLM2-135M-bf16.gguf --outtype bf16
 
 Regole (come convert_hf_to_gguf.py di llama.cpp):
 - i tensori 1D (norm, bias) restano sempre F32; le matrici prendono il tipo scelto;
@@ -21,10 +21,10 @@ from pathlib import Path
 
 import numpy as np
 
-from engine import quant
-from engine.loader import hf_config
-from engine.loader.gguf_writer import GGUFWriter, f32_to_bf16
-from engine.loader.safetensors import SafeTensorsDir
+from sardyne import quant
+from sardyne.loader import hf_config
+from sardyne.loader.gguf_writer import GGUFWriter, f32_to_bf16
+from sardyne.loader.safetensors import SafeTensorsDir
 
 HF_TO_GGUF_ARCH = {"LlamaForCausalLM": "llama", "Qwen2ForCausalLM": "qwen2", "Qwen3ForCausalLM": "qwen3"}
 FILE_TYPE = {"f32": 0, "f16": 1, "q4_0": 2, "q8_0": 7, "bf16": 32}  # general.file_type (enum llama_ftype)
@@ -104,7 +104,7 @@ def _encode(name: str, data: np.ndarray, outtype: str) -> tuple[str, np.ndarray]
 
 def tokenizer_metadata(w: GGUFWriter, hf_dir, vocab_size: int):
     """Scrive il tokenizer con le stesse chiavi di llama.cpp."""
-    from engine.tokenizer.bpe import BPETokenizer
+    from sardyne.tokenizer.bpe import BPETokenizer
 
     tok = BPETokenizer.from_hf_dir(hf_dir, vocab_size)
     w.add("tokenizer.ggml.model", "gpt2")

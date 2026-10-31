@@ -1,4 +1,4 @@
-"""Scrittura di file GGUF v3 (formato descritto in engine/loader/gguf.py).
+"""Scrittura di file GGUF v3 (formato descritto in sardyne/loader/gguf.py).
 
 - I dati dei tensori possono essere prodotti al momento della scrittura (add_lazy_tensor):
   l'header dipende solo da nomi, dimensioni e tipi, quindi il modello convertito non deve
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from engine.loader.gguf import DEFAULT_ALIGNMENT, GGML_TYPE_ID, GGUF_MAGIC, VALUE_TYPES, tensor_nbytes
+from sardyne.loader.gguf import DEFAULT_ALIGNMENT, GGML_TYPE_ID, GGUF_MAGIC, VALUE_TYPES, tensor_nbytes
 
 _VT = {name: tid for tid, (name, _) in VALUE_TYPES.items()}
 _NP_TO_VT = {np.dtype(np.uint8): "UINT8", np.dtype(np.int8): "INT8", np.dtype(np.uint16): "UINT16",

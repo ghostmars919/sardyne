@@ -1,5 +1,5 @@
 [project]
-name = "llm-engine"
+name = "sardyne"
 version = "0.0.1"
 description = "Motore di inferenza LLM open-weight (Python + C, CPU)"
 requires-python = ">=3.10"
@@ -19,4 +19,4 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["engine*"]
+include = ["sardyne*"]

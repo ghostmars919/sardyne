@@ -1,6 +1,6 @@
 """Modello Llama-like in NumPy (fp32): la reference numerica del motore.
 
-Rispetto al Transformer del paper (engine/ref/transformer.py):
+Rispetto al Transformer del paper (sardyne/ref/transformer.py):
 - pre-norm con RMSNorm:   x = x + Attn(RMSNorm(x));  x = x + MLP(RMSNorm(x))
 - RoPE applicata a q e k in ogni strato, al posto della PE sommata all'embedding
 - GQA: n_kv_head <= n_head teste per chiavi e valori
@@ -14,7 +14,7 @@ bias, con una RMSNorm per testa su q e k prima della RoPE).
 Da GGUF anche "qwen3moe" (Qwen3-30B-A3B): come Qwen3, ma l'MLP è sostituito da una Mixture of
 Experts (vedi Llama.moe). Con i file grandi serve lazy=True, che tiene in RAM solo i vettori.
 
-Uso: python -m engine.ref.llama models/SmolLM2-135M "The capital of France is" -n 30
+Uso: python -m sardyne.ref.llama models/SmolLM2-135M "The capital of France is" -n 30
 """
 import argparse
 import json
@@ -25,11 +25,11 @@ from pathlib import Path
 
 import numpy as np
 
-from engine import quant
-from engine.loader import hf_config
-from engine.loader.gguf import GGUFFile, LazyTensor
-from engine.loader.safetensors import SafeTensorsDir
-from engine.ref import ops
+from sardyne import quant
+from sardyne.loader import hf_config
+from sardyne.loader.gguf import GGUFFile, LazyTensor
+from sardyne.loader.safetensors import SafeTensorsDir
+from sardyne.ref import ops
 
 SUPPORTED = {"LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"}
 
@@ -439,7 +439,7 @@ class Llama:
 
 
 def main():
-    from engine.tokenizer.bpe import BPETokenizer, Streamer
+    from sardyne.tokenizer.bpe import BPETokenizer, Streamer
 
     ap = argparse.ArgumentParser(description="Generazione greedy con la reference NumPy")
     ap.add_argument("model", help="file .gguf oppure cartella HF (config.json, *.safetensors, tokenizer.json)")

@@ -1,15 +1,15 @@
 """Chat da terminale.
 
-Uso: python -m engine.cli models/gguf/qwen2.5-3b-instruct-q4_k_m.gguf [--system "..."] [--temperature 0.7]
+Uso: python -m sardyne.cli models/gguf/qwen2.5-3b-instruct-q4_k_m.gguf [--system "..."] [--temperature 0.7]
 
 Comandi: /reset ricomincia la conversazione, /exit esce (come Ctrl-D).
 """
 import argparse
 import time
 
-from engine.chat import THINK_CLOSE, THINK_OPEN, ChatEngine
-from engine.runtime import add_sampling_args, sampling_params
-from engine.sampling import Sampler
+from sardyne.chat import THINK_CLOSE, THINK_OPEN, ChatEngine
+from sardyne.runtime import add_sampling_args, sampling_params
+from sardyne.sampling import Sampler
 
 
 class ThinkFilter:

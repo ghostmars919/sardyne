@@ -1,6 +1,6 @@
 /* Runtime fp32 per modelli Llama-like (architetture GGUF "llama", "qwen2", "qwen3" e "qwen3moe").
  *
- * È la traduzione in C di engine/ref/llama.py: stesse operazioni, nello stesso ordine.
+ * È la traduzione in C di sardyne/ref/llama.py: stesse operazioni, nello stesso ordine.
  * Le matrici dei pesi restano nella mmap del file GGUF; norm e bias (piccoli) vengono
  * convertiti in fp32 al caricamento.
  */
@@ -133,7 +133,7 @@ static const char *LAYER_SUFFIXES[] = {
     "ffn_gate_inp.weight", "ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight",
 };
 
-/* Come _GGUF_TENSOR in engine/ref/llama.py: un tensore sconosciuto indica una variante
+/* Come _GGUF_TENSOR in sardyne/ref/llama.py: un tensore sconosciuto indica una variante
  * dell'architettura che non sappiamo eseguire (es. rope_freqs.weight dei Llama 3.1). */
 static int known_tensor(const char *name, int n_layer) {
     if (!strcmp(name, "token_embd.weight") || !strcmp(name, "output_norm.weight") || !strcmp(name, "output.weight"))
@@ -649,7 +649,7 @@ static void silu_worker(void *arg, int ith, int nth) {
 /* ---------------------------------------------------------------- Mixture of Experts */
 
 /* I k esperti più probabili, dal più probabile; a pari probabilità vince l'indice più basso
- * (come l'argsort stabile di engine/ref/llama.py). I pesi sommano a 1. */
+ * (come l'argsort stabile di sardyne/ref/llama.py). I pesi sommano a 1. */
 static void moe_select(const float *probs, int n_expert, int k, int32_t *top, float *w) {
     int n = 0;
     for (int e = 0; e < n_expert; e++) {

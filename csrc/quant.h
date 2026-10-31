@@ -1,7 +1,7 @@
 #ifndef QUANT_H
 #define QUANT_H
 
-/* Formati quantizzati di ggml (Fase 5). Reference NumPy: engine/quant.py.
+/* Formati quantizzati di ggml (Fase 5). Reference NumPy: sardyne/quant.py.
  *
  * Il prodotto peso·attivazione non dequantizza i pesi: le attivazioni di ogni token vengono
  * quantizzate una volta in int8 (Q8_0 per i pesi a blocchi da 32, Q8_K per i K-quant da 256),

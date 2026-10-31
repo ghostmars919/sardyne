@@ -19,8 +19,8 @@ from pathlib import Path
 
 import regex
 
-from engine.loader import hf_config
-from engine.loader.gguf import GGUFFile
+from sardyne.loader import hf_config
+from sardyne.loader.gguf import GGUFFile
 
 # Tipi dei token nei GGUF (enum llama_token_type).
 NORMAL, CONTROL, USER_DEFINED, UNUSED = 1, 3, 4, 5

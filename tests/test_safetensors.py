@@ -4,7 +4,7 @@ import struct
 import numpy as np
 import pytest
 
-from engine.loader.safetensors import SafeTensorsDir, SafeTensorsError, SafeTensorsFile
+from sardyne.loader.safetensors import SafeTensorsDir, SafeTensorsError, SafeTensorsFile
 
 
 def _write(path, header: dict, data: bytes = b"", header_len: int | None = None):

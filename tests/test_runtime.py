@@ -5,15 +5,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from engine import capi
+from sardyne import capi
 
-pytestmark = pytest.mark.skipif(not capi.available(), reason="libengine non compilata: eseguire make")
+pytestmark = pytest.mark.skipif(not capi.available(), reason="libsardyne non compilata: eseguire make")
 
-from engine.loader.convert import convert  # noqa: E402
-from engine.loader.gguf_writer import f32_to_bf16  # noqa: E402
-from engine.ref import ops  # noqa: E402
-from engine.ref.llama import Llama  # noqa: E402
-from engine.runtime import Context, Model, generate, set_simd, simd  # noqa: E402
+from sardyne.loader.convert import convert  # noqa: E402
+from sardyne.loader.gguf_writer import f32_to_bf16  # noqa: E402
+from sardyne.ref import ops  # noqa: E402
+from sardyne.ref.llama import Llama  # noqa: E402
+from sardyne.runtime import Context, Model, generate, set_simd, simd  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 GGUF_DIR = ROOT / "models" / "gguf"
@@ -289,8 +289,8 @@ def test_missing_file_is_rejected(tmp_path):
 
 
 def test_rope_freqs_and_unknown_tensors_are_rejected(tmp_path):
-    from engine.loader.gguf import GGUFFile, VALUE_TYPES
-    from engine.loader.gguf_writer import GGUFWriter
+    from sardyne.loader.gguf import GGUFFile, VALUE_TYPES
+    from sardyne.loader.gguf_writer import GGUFWriter
     from test_convert import make_hf
 
     hf = make_hf(tmp_path / "hf")
@@ -377,8 +377,8 @@ def test_real_large_model():
 
 
 def test_unsupported_quant_type_is_rejected(tmp_path):
-    from engine.loader.gguf import GGUFFile, VALUE_TYPES
-    from engine.loader.gguf_writer import GGUFWriter
+    from sardyne.loader.gguf import GGUFFile, VALUE_TYPES
+    from sardyne.loader.gguf_writer import GGUFWriter
     from test_convert import make_hf
 
     hf = make_hf(tmp_path / "hf")
