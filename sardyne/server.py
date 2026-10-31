@@ -1,6 +1,6 @@
 """Server HTTP compatibile OpenAI, con FastAPI.
 
-Uso: python -m sardyne.server models/gguf/qwen2.5-3b-instruct-q4_k_m.gguf [--port 8080] [--api-key SEGRETO]
+Uso: python -m sardyne.server models/gguf/qwen2.5-3b-instruct-q4_k_m.gguf [--port 8080]
 
 Endpoint: POST /v1/chat/completions (con e senza stream, con strumenti), GET /v1/models, GET /health.
 Il modello è uno e la KV cache pure: si genera una richiesta alla volta, le altre aspettano il loro turno.
@@ -12,6 +12,7 @@ Il testo di <think> resta in content: decidere se mostrarlo spetta al client.
 import argparse
 import asyncio
 import json
+import os
 import secrets
 import time
 import uuid
@@ -274,24 +275,31 @@ def create_app(engine: ChatEngine, name: str = "local", api_key: str | None = No
     return app
 
 
-def main():
-    import uvicorn
-
-    from sardyne.runtime import add_sampling_args, sampling_params
+def arg_parser() -> argparse.ArgumentParser:
+    from sardyne.runtime import add_sampling_args
 
     ap = argparse.ArgumentParser(description="Server compatibile OpenAI")
     ap.add_argument("model")
     ap.add_argument("--tokenizer", help="cartella HF (default: il tokenizer nel file .gguf)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--api-key", help="se indicata, le richieste devono presentarla")
+    ap.add_argument("--api-key", default=os.environ.get("SARDYNE_API_KEY") or None,
+                    help="se indicata, le richieste devono presentarla (default: $SARDYNE_API_KEY)")
     ap.add_argument("--max-seq", type=int, default=4096)
     ap.add_argument("--max-tokens", type=int, default=1024, help="token massimi per risposta, se il client non li indica")
     ap.add_argument("--threads", type=int, default=0)
     add_sampling_args(ap, temperature=0.7)
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    import uvicorn
+
+    from sardyne.runtime import sampling_params
+
+    args = arg_parser().parse_args()
     if args.host not in ("127.0.0.1", "localhost", "::1") and not args.api_key:
-        print("[attenzione: il server è raggiungibile dalla rete e senza --api-key chiunque può usarlo]")
+        print("[attenzione: il server è raggiungibile dalla rete e senza chiave chiunque può usarlo]")
 
     engine = ChatEngine(args.model, args.max_seq, args.threads, args.tokenizer)
     uvicorn.run(create_app(engine, Path(args.model).stem, args.api_key, sampling_params(args), args.max_tokens),

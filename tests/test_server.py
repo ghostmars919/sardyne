@@ -155,6 +155,18 @@ def test_normalize_messages():
     assert [m["content"] for m in got] == ["a", "bc", ""] and got[0]["role"] == "system"
 
 
+def test_api_key_comes_from_the_environment(monkeypatch):
+    from sardyne.server import arg_parser
+
+    monkeypatch.setenv("SARDYNE_API_KEY", "da-ambiente")
+    assert arg_parser().parse_args(["m.gguf"]).api_key == "da-ambiente"
+    assert arg_parser().parse_args(["m.gguf", "--api-key", "da-riga"]).api_key == "da-riga"
+    monkeypatch.setenv("SARDYNE_API_KEY", "")
+    assert arg_parser().parse_args(["m.gguf"]).api_key is None
+    monkeypatch.delenv("SARDYNE_API_KEY")
+    assert arg_parser().parse_args(["m.gguf"]).api_key is None
+
+
 def test_api_key():
     c, _ = client(api_key="segreto")
     assert post(c).status_code == 401
